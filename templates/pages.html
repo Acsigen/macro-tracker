@@ -1,0 +1,125 @@
+{{define "top"}}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#0b1f33" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f3f6ef" media="(prefers-color-scheme: light)">
+  <link rel="manifest" href="/assets/app.webmanifest">
+  <link rel="icon" href="/assets/icon-192.png">
+  <title>{{.Title}} · Macro Tracker</title>
+  <link rel="stylesheet" href="/assets/app.css">
+  <script defer src="/assets/htmx.min.js"></script>
+  <script defer src="/assets/echarts.min.js"></script>
+  <script defer src="/assets/app.js"></script>
+</head>
+<body hx-boost="true">
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="masthead">
+    <a class="wordmark" href="/" aria-label="Macro Tracker home"><span>MT</span> Macro Tracker</a>
+    <nav aria-label="Main navigation">
+      <a href="/" {{if eq .Path "/"}}aria-current="page"{{end}}>Log</a>
+      <a href="/nutrition" {{if eq .Path "/nutrition"}}aria-current="page"{{end}}>Nutrition</a>
+      <a href="/body" {{if eq .Path "/body"}}aria-current="page"{{end}}>Body</a>
+      <a href="/sleep" {{if eq .Path "/sleep"}}aria-current="page"{{end}}>Sleep</a>
+      <a href="/settings" {{if eq .Path "/settings"}}aria-current="page"{{end}}>Settings</a>
+    </nav>
+    <form action="/logout" method="post" class="logout"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="quiet">Sign out</button></form>
+  </header>
+  <main id="main" class="shell">
+{{end}}
+
+{{define "bottom"}}
+  </main>
+  <footer>Macro Tracker {{.Version}} · Private local health log</footer>
+</body>
+</html>{{end}}
+
+{{define "login"}}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#0b1f33" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f3f6ef" media="(prefers-color-scheme: light)">
+  <link rel="manifest" href="/assets/app.webmanifest">
+  <link rel="icon" href="/assets/icon-192.png">
+  <title>Access · Macro Tracker</title>
+  <link rel="stylesheet" href="/assets/app.css">
+</head>
+<body class="login-screen">
+  <main class="login-panel">
+    <p class="mission-tag">PRIVATE HEALTH LOG · {{.Version}}</p>
+    <h1>Mission access</h1>
+    <p>Enter the credentials set on this server.</p>
+    {{if .Error}}<p class="alert" role="alert">{{.Error}}</p>{{end}}
+    <form action="/login" method="post" class="stack">
+      <label>Email<input name="email" type="email" autocomplete="username" required autofocus></label>
+      <label>Password<input name="password" type="password" autocomplete="current-password" required></label>
+      <button>Open mission log</button>
+    </form>
+  </main>
+</body>
+</html>{{end}}
+
+{{define "dashboard"}}{{template "top" .}}
+  <section class="hero">
+    <div><p class="mission-tag">DAILY MISSION · {{.Today}}</p><h1>{{if .Profile.Name}}{{.Profile.Name}}’s health log{{else}}Health log{{end}}</h1></div>
+    <p>Record today. Read the trend. Keep the data private.</p>
+  </section>
+  <section class="mission-strip" aria-label="Today’s mission status">
+    <a href="/nutrition"><span>NUTRITION</span><strong>{{if .Daily.Nutrition}}Logged{{else}}Open{{end}}</strong><i class="{{if .Daily.Nutrition}}done{{end}}"></i></a>
+    <a href="/body"><span>BODY</span><strong>{{if .Daily.Body}}Logged{{else}}Open{{end}}</strong><i class="{{if .Daily.Body}}done{{end}}"></i></a>
+    <a href="/sleep"><span>SLEEP</span><strong>{{if .Daily.Sleep}}Logged{{else}}Open{{end}}</strong><i class="{{if .Daily.Sleep}}done{{end}}"></i></a>
+  </section>
+  <section class="dashboard-grid">
+    <article class="panel span-7"><p class="kicker">TODAY’S FLIGHT PLAN</p><h2>Three quick readings</h2><p>Log food as you eat. Add one body reading. Record the sleep that ended today.</p><div class="actions"><a class="button" href="/nutrition">Log food</a><a class="button secondary" href="/body">Add measurements</a><a class="text-link" href="/sleep">Record sleep</a></div></article>
+    <aside class="panel caution span-5"><p class="kicker">REFERENCE NOTICE</p><h2>Guides, not diagnoses</h2><p>Health bands show adult population references. They do not provide medical advice or a personal diagnosis.</p></aside>
+  </section>
+{{template "bottom" .}}{{end}}
+
+{{define "range"}}<form method="get" class="range" data-auto-submit><label>Chart range<select name="days"><option value="7" {{if eq .Range "7"}}selected{{end}}>7 days</option><option value="30" {{if eq .Range "30"}}selected{{end}}>30 days</option><option value="90" {{if eq .Range "90"}}selected{{end}}>90 days</option><option value="365" {{if eq .Range "365"}}selected{{end}}>365 days</option></select></label></form>{{end}}
+
+{{define "nutrition"}}{{template "top" .}}
+  <header class="page-head"><div><p class="mission-tag">PAYLOAD · DAILY INTAKE</p><h1>Nutrition</h1><p>Food values use grams per 100 grams. Logged entries keep a snapshot.</p></div>{{template "range" .}}</header>
+  <section class="metric-grid" aria-label="Today’s totals">
+    <article><span>Carbohydrate</span><strong>{{f .Totals.Carbohydrate}} g</strong><small>{{f .Totals.CarbMin}}–{{f .Totals.CarbMax}} g band</small></article>
+    <article><span>Total sugar</span><strong>{{f .Totals.TotalSugar}} g</strong></article>
+    <article><span>Free sugar</span><strong>{{if .Totals.FreeSugar}}{{f .Totals.FreeSugar}} g{{else}}Unknown{{end}}</strong><small>{{f .Totals.FreePreferred}} g preferred · {{f .Totals.FreeUpper}} g upper</small></article>
+    <article><span>Protein</span><strong>{{f .Totals.Protein}} g</strong><small>{{f .Totals.ProteinMin}}–{{f .Totals.ProteinMax}} g band</small></article>
+    <article><span>Fiber</span><strong>{{f .Totals.Fiber}} g</strong><small>25 g minimum</small></article>
+    <article><span>Salt</span><strong>{{f .Totals.Salt}} g</strong><small>5 g maximum</small></article>
+  </section>
+  <section class="panel chart-panel"><div class="chart" data-kind="nutrition" data-chart="{{.ChartJSON}}" role="img" aria-label="{{.Summary}}"></div><p class="chart-summary">{{.Summary}} Missing free-sugar data appears as a gap, not zero. Read the <a href="https://www.who.int/news-room/fact-sheets/detail/healthy-diet">WHO healthy diet guidance</a>.</p></section>
+  <div class="content-grid">
+    <section class="panel span-5"><p class="kicker">LOG INTAKE</p><h2>Add food entry</h2>{{if .Foods}}<form action="/nutrition/entries" method="post" class="stack"><input type="hidden" name="csrf" value="{{.CSRF}}"><label>Date<input type="date" name="entry_date" value="{{.Today}}" required></label><label>Saved food<select name="food_id" required><option value="">Select a food</option>{{range .Foods}}<option value="{{.ID}}">{{.Name}}</option>{{end}}</select></label><label>Amount eaten (g)<input type="number" name="consumed_g" min="0.01" max="100000" step="0.01" required></label><button>Log intake</button></form>{{else}}<p>Save a food before you log an entry.</p>{{end}}</section>
+    <section class="panel span-7"><p class="kicker">FOOD LIBRARY</p><h2>Save food</h2><form action="/nutrition/foods" method="post" class="form-grid"><input type="hidden" name="csrf" value="{{.CSRF}}"><label class="wide">Food name<input name="name" maxlength="120" required></label><label>Carbohydrate<input type="number" name="carbohydrate" min="0" max="100" step="0.01" required></label><label>Total sugar<input type="number" name="total_sugar" min="0" max="100" step="0.01" required></label><label>Free sugar <small>optional</small><input type="number" name="free_sugar" min="0" max="100" step="0.01"></label><label>Protein<input type="number" name="protein" min="0" max="100" step="0.01" required></label><label>Fiber<input type="number" name="fiber" min="0" max="100" step="0.01" required></label><label>Salt<input type="number" name="salt" min="0" max="100" step="0.01" required></label><button class="wide">Save food</button></form></section>
+  </div>
+  <section class="panel records"><p class="kicker">INTAKE LOG</p><h2>Recent entries</h2>{{if .FoodEntries}}{{range .FoodEntries}}{{$entry := .}}<details><summary><span><strong>{{.FoodName}}</strong><small>{{.Date}} · {{f .ConsumedG}} g</small></span><span>{{f .Carbohydrate}} g carbs / 100 g</span></summary><form action="/nutrition/entries/{{.ID}}" method="post" class="inline-edit"><input type="hidden" name="csrf" value="{{$.CSRF}}"><label>Date<input type="date" name="entry_date" value="{{.Date}}" required></label><label>Food<select name="food_id" required>{{range $.Foods}}<option value="{{.ID}}" {{if eq .ID $entry.FoodID}}selected{{end}}>{{.Name}}</option>{{end}}</select></label><label>Amount (g)<input type="number" name="consumed_g" value="{{.ConsumedG}}" min="0.01" max="100000" step="0.01" required></label><button>Save changes</button><a class="danger-link" href="/nutrition/entries/{{.ID}}/delete">Delete</a></form></details>{{end}}{{else}}<p>No food entries yet.</p>{{end}}</section>
+  <section class="panel records"><p class="kicker">SAVED FOODS</p><h2>Food library</h2>{{if .Foods}}{{range .Foods}}<details><summary><span><strong>{{.Name}}</strong><small>{{f .Carbohydrate}} g carbohydrate · {{f .Protein}} g protein</small></span><span>Edit</span></summary><form action="/nutrition/foods/{{.ID}}" method="post" class="form-grid"><input type="hidden" name="csrf" value="{{$.CSRF}}"><label class="wide">Food name<input name="name" value="{{.Name}}" maxlength="120" required></label><label>Carbohydrate<input type="number" name="carbohydrate" value="{{.Carbohydrate}}" min="0" max="100" step="0.01" required></label><label>Total sugar<input type="number" name="total_sugar" value="{{.TotalSugar}}" min="0" max="100" step="0.01" required></label><label>Free sugar<input type="number" name="free_sugar" value="{{ptr .FreeSugar}}" min="0" max="100" step="0.01"></label><label>Protein<input type="number" name="protein" value="{{.Protein}}" min="0" max="100" step="0.01" required></label><label>Fiber<input type="number" name="fiber" value="{{.Fiber}}" min="0" max="100" step="0.01" required></label><label>Salt<input type="number" name="salt" value="{{.Salt}}" min="0" max="100" step="0.01" required></label><button>Save changes</button><a class="danger-link" href="/nutrition/foods/{{.ID}}/delete">Delete</a></form></details>{{end}}{{else}}<p>No saved foods yet.</p>{{end}}</section>
+{{template "bottom" .}}{{end}}
+
+{{define "body"}}{{template "top" .}}
+  <header class="page-head"><div><p class="mission-tag">BIOMETRY · ADULT REFERENCE</p><h1>Body</h1><p>Track weight, body mass index, and abdominal circumference.</p></div>{{template "range" .}}</header>
+  <section class="panel chart-panel"><div class="chart" data-kind="body" data-chart="{{.ChartJSON}}" role="img" aria-label="{{.Summary}}"></div><p class="chart-summary">{{.Summary}} BMI uses 18.5, 25, and 30. The optimal waist range is half your height, plus or minus 4 cm.</p></section>
+  <div class="content-grid"><section class="panel span-5"><p class="kicker">NEW READING</p><h2>Add measurements</h2><form action="/body" method="post" class="stack"><input type="hidden" name="csrf" value="{{.CSRF}}"><label>Date<input type="date" name="entry_date" value="{{.Today}}" required></label><label>Weight (kg)<input type="number" name="weight_kg" min="1" max="1000" step="0.01" required></label><label>Waist (cm)<input type="number" name="waist_cm" min="1" max="500" step="0.01" required></label><button>Save reading</button></form><p class="note">Saving the same date replaces that day’s reading.</p></section><aside class="panel caution span-7"><p class="kicker">REFERENCE</p><h2>Personal range</h2><p>Your optimal waist target is half your height. The optimal range extends 4 cm below and above that target.</p><p>Add your height in <a href="/settings">settings</a> to show the range. BMI bands use the <a href="https://www.who.int/news-room/fact-sheets/detail/obesity-and-overweight">WHO adult definitions</a>.</p></aside></div>
+  <section class="panel records"><p class="kicker">MEASUREMENT LOG</p><h2>Recent readings</h2>{{if .BodyEntries}}{{range .BodyEntries}}<details><summary><span><strong>{{.Date}}</strong><small>{{f .WeightKG}} kg · {{f .WaistCM}} cm{{if .WaistStatus}} · {{.WaistStatus}}{{end}}</small></span><span>{{if .BMI}}BMI {{f .BMI}} · {{.BMIStatus}}{{else}}Add height for personal ranges{{end}}</span></summary><form action="/body/{{.ID}}" method="post" class="inline-edit"><input type="hidden" name="csrf" value="{{$.CSRF}}"><label>Date<input type="date" name="entry_date" value="{{.Date}}" required></label><label>Weight (kg)<input type="number" name="weight_kg" value="{{.WeightKG}}" min="1" max="1000" step="0.01" required></label><label>Waist (cm)<input type="number" name="waist_cm" value="{{.WaistCM}}" min="1" max="500" step="0.01" required></label><button>Save changes</button><a class="danger-link" href="/body/{{.ID}}/delete">Delete</a></form></details>{{end}}{{else}}<p>No body readings yet.</p>{{end}}</section>
+{{template "bottom" .}}{{end}}
+
+{{define "sleep"}}{{template "top" .}}
+  <header class="page-head"><div><p class="mission-tag">REST CYCLE · DURATION</p><h1>Sleep</h1><p>Record the sleep period that ended on the selected date.</p></div>{{template "range" .}}</header>
+  <section class="panel chart-panel"><div class="chart" data-kind="sleep" data-chart="{{.ChartJSON}}" role="img" aria-label="{{.Summary}}"></div><p class="chart-summary">{{.Summary}}</p></section>
+  <div class="content-grid"><section class="panel span-5"><p class="kicker">NEW REST CYCLE</p><h2>Record sleep</h2><form action="/sleep" method="post" class="stack"><input type="hidden" name="csrf" value="{{.CSRF}}"><label>Wake date<input type="date" name="entry_date" value="{{.Today}}" required></label><label>Went to sleep<input type="time" name="bed_time" required></label><label>Woke up<input type="time" name="wake_time" required></label><button>Save sleep</button></form><p class="note">A wake time before bedtime counts as the next morning.</p></section><aside class="panel span-7"><p class="kicker">READOUT</p><h2>Duration only</h2><p>The chart shows elapsed sleep time. It does not apply a health band because sleep needs differ between people.</p></aside></div>
+  <section class="panel records"><p class="kicker">SLEEP LOG</p><h2>Recent rest cycles</h2>{{if .SleepEntries}}{{range .SleepEntries}}<details><summary><span><strong>{{.Date}}</strong><small>{{.BedTime}} to {{.WakeTime}}</small></span><span>{{f .DurationHours}} hours</span></summary><form action="/sleep/{{.ID}}" method="post" class="inline-edit"><input type="hidden" name="csrf" value="{{$.CSRF}}"><label>Wake date<input type="date" name="entry_date" value="{{.Date}}" required></label><label>Went to sleep<input type="time" name="bed_time" value="{{.BedTime}}" required></label><label>Woke up<input type="time" name="wake_time" value="{{.WakeTime}}" required></label><button>Save changes</button><a class="danger-link" href="/sleep/{{.ID}}/delete">Delete</a></form></details>{{end}}{{else}}<p>No sleep records yet.</p>{{end}}</section>
+{{template "bottom" .}}{{end}}
+
+{{define "settings"}}{{template "top" .}}
+  <header class="page-head"><div><p class="mission-tag">MISSION PROFILE</p><h1>Settings</h1><p>These values set personal calculations and chart references.</p></div></header>
+  <section class="panel narrow"><form action="/settings" method="post" class="stack"><input type="hidden" name="csrf" value="{{.CSRF}}"><label>Name<input name="name" value="{{.Profile.Name}}" maxlength="120"></label><label>Height (cm)<input type="number" name="height_cm" value="{{ptr .Profile.HeightCM}}" min="50" max="300" step="0.1"></label><label>Daily energy target (kcal)<input type="number" name="energy_target" value="{{.Profile.EnergyTarget}}" min="500" max="10000" step="1" required></label><button>Save profile</button></form><p class="note">Your height sets the BMI value and the optimal waist range.</p></section>
+{{template "bottom" .}}{{end}}
+
+{{define "delete"}}{{template "top" .}}
+  <section class="panel confirm"><p class="mission-tag">CONFIRM ACTION</p><h1>Delete {{.DeleteKind}}?</h1><p>This removes {{.DeleteName}}. You cannot restore it from this page.</p><form action="{{.DeleteAction}}" method="post" class="actions"><input type="hidden" name="csrf" value="{{.CSRF}}"><button class="danger">Delete record</button><a class="button secondary" href="{{.DeleteBack}}">Keep record</a></form></section>
+{{template "bottom" .}}{{end}}

@@ -1,0 +1,16 @@
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      APP_EMAIL: ${APP_EMAIL:?Set APP_EMAIL}
+      APP_PASSWORD: ${APP_PASSWORD:?Set APP_PASSWORD}
+      APP_TIMEZONE: ${APP_TIMEZONE:-Europe/Madrid}
+      APP_SECURE_COOKIE: ${APP_SECURE_COOKIE:-false}
+    volumes:
+      - macro-data:/data
+
+volumes:
+  macro-data:
