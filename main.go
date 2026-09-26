@@ -453,8 +453,22 @@ func (a *app) getProfile() (profile, error) {
 }
 
 func (a *app) dashboard(w http.ResponseWriter, r *http.Request) {
-	d := a.baseData(r, "Mission log")
+	d := a.baseData(r, "Overview")
 	d.Profile, _ = a.getProfile()
+	var err error
+	if d.FoodEntries, err = a.listFoodEntries(5); err != nil {
+		http.Error(w, "Food entries could not be loaded", http.StatusInternalServerError)
+		return
+	}
+	if d.BodyEntries, err = a.listBody(1, d.Profile); err != nil {
+		http.Error(w, "Body measurements could not be loaded", http.StatusInternalServerError)
+		return
+	}
+	if d.SleepEntries, err = a.listSleep(1); err != nil {
+		http.Error(w, "Sleep records could not be loaded", http.StatusInternalServerError)
+		return
+	}
+	d.Totals = dailyNutrition(a.db, d.Today)
 	today := d.Today
 	a.db.QueryRow("SELECT EXISTS(SELECT 1 FROM food_entries WHERE entry_date=?)", today).Scan(&d.Daily.Nutrition)
 	a.db.QueryRow("SELECT EXISTS(SELECT 1 FROM body_entries WHERE entry_date=?)", today).Scan(&d.Daily.Body)

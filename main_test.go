@@ -31,7 +31,7 @@ func testApp(t *testing.T) *app {
 	}
 	t.Cleanup(func() { db.Close() })
 	tpl, err := template.New("pages").Funcs(template.FuncMap{
-		"f":   func(float64) string { return "0" },
+		"f":   func(v float64) string { return fmt.Sprintf("%.1f", v) },
 		"ptr": func(*float64) string { return "" },
 		"pct": func(float64, float64) float64 { return 0 },
 	}).ParseFS(files, "templates/*.html")
@@ -166,6 +166,44 @@ func TestPopulatedPagesRender(t *testing.T) {
 		if res.Code != http.StatusOK || !strings.Contains(res.Body.String(), "</html>") {
 			t.Errorf("%s did not render a complete page", path)
 		}
+	}
+}
+
+func TestDashboardCurrentAndLatestData(t *testing.T) {
+	a := testApp(t)
+	h := a.routes()
+	getOverview := func() string {
+		t.Helper()
+		req := httptest.NewRequest("GET", "/", nil)
+		req.AddCookie(&http.Cookie{Name: "session", Value: "test"})
+		res := httptest.NewRecorder()
+		h.ServeHTTP(res, req)
+		if res.Code != http.StatusOK {
+			t.Fatalf("overview: %d", res.Code)
+		}
+		return res.Body.String()
+	}
+	empty := getOverview()
+	for _, want := range []string{"No food logged", "No measurements", "No sleep recorded", "Your daily totals start here"} {
+		if !strings.Contains(empty, want) {
+			t.Errorf("empty overview missing %q", want)
+		}
+	}
+	today := time.Now().UTC().Format("2006-01-02")
+	yesterday := time.Now().UTC().AddDate(0, 0, -1).Format("2006-01-02")
+	doForm(t, h, "POST", "/nutrition/foods", url.Values{"csrf": {"csrf"}, "name": {"Oats"}, "carbohydrate": {"60"}, "total_sugar": {"1"}, "protein": {"12"}, "fiber": {"10"}, "salt": {"0"}}, true, http.StatusSeeOther)
+	doForm(t, h, "POST", "/nutrition/entries", url.Values{"csrf": {"csrf"}, "entry_date": {today}, "food_id": {"1"}, "consumed_g": {"50"}}, true, http.StatusSeeOther)
+	doForm(t, h, "POST", "/nutrition/entries", url.Values{"csrf": {"csrf"}, "entry_date": {yesterday}, "food_id": {"1"}, "consumed_g": {"100"}}, true, http.StatusSeeOther)
+	doForm(t, h, "POST", "/body", url.Values{"csrf": {"csrf"}, "entry_date": {yesterday}, "weight_kg": {"75"}, "waist_cm": {"85"}}, true, http.StatusSeeOther)
+	doForm(t, h, "POST", "/sleep", url.Values{"csrf": {"csrf"}, "entry_date": {today}, "bed_time": {"23:30"}, "wake_time": {"07:00"}}, true, http.StatusSeeOther)
+	populated := getOverview()
+	for _, want := range []string{"30.0 <span>g carbs</span>", "6.0 g protein", "75.0 <span>kg</span>", "7.5 <span>hours</span>", "Latest: <time>" + yesterday, "Oats", "Unknown", "/nutrition#entry-1"} {
+		if !strings.Contains(populated, want) {
+			t.Errorf("populated overview missing %q", want)
+		}
+	}
+	if strings.Count(populated, ">Logged today</span>") != 2 || strings.Count(populated, ">Not logged today</span>") != 1 {
+		t.Error("overview must distinguish today's entries from older measurements")
 	}
 }
 

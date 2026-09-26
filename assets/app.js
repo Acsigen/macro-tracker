@@ -5,14 +5,15 @@ document.addEventListener("change", (event) => {
 function baseChart(data) {
   const color = (name) => getComputedStyle(document.documentElement).getPropertyValue(`--${name}`).trim();
   return {
-    animationDuration: 500,
+    animation: !matchMedia("(prefers-reduced-motion: reduce)").matches,
+    animationDuration: 300,
     aria: { enabled: true },
     backgroundColor: "transparent",
     textStyle: { color: color("paper"), fontFamily: "Atkinson Hyperlegible" },
     tooltip: { trigger: "axis", backgroundColor: color("tooltip"), textStyle: { color: color("orbit") } },
-    legend: { top: 0, textStyle: { color: color("paper") } },
-    grid: { top: 48, right: 24, bottom: 44, left: 56 },
-    xAxis: { type: "category", data: data.labels, axisLine: { lineStyle: { color: color("axis") } }, axisLabel: { color: color("muted"), hideOverlap: true } },
+    legend: { type: "scroll", top: 0, textStyle: { color: color("paper") }, pageTextStyle: { color: color("muted") }, pageIconColor: color("cyan") },
+    grid: { top: 48, right: 32, bottom: 16, left: 8, containLabel: true },
+    xAxis: { type: "category", data: data.labels, axisLine: { lineStyle: { color: color("axis") } }, axisLabel: { color: color("muted"), hideOverlap: true, formatter: (value) => value.slice(5) } },
     yAxis: { type: "value", axisLine: { show: false }, splitLine: { lineStyle: { color: color("line") } }, axisLabel: { color: color("muted") } }
   };
 }
@@ -52,6 +53,10 @@ function renderCharts() {
     } else {
       option.series = [{ name: "Sleep hours", type: "bar", data: data.hours, itemStyle: { color: color("cyan"), borderRadius: [3, 3, 0, 0] } }];
     }
+    option.series.forEach((series) => {
+      if (series.markLine) series.markLine.label = { color: color("muted"), textBorderWidth: 0, position: "insideEndTop" };
+      if (series.markArea) series.markArea.label = { color: color("muted"), textBorderWidth: 0, position: "insideTop" };
+    });
     const chart = echarts.init(element);
     chart.setOption(option);
     new ResizeObserver(() => chart.resize()).observe(element);
