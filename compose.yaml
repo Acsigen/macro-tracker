@@ -1,5 +1,6 @@
 services:
   app:
+    image: "${MACRO_TRACKER_IMAGE:-acsigen/macro-tracker:latest}"
     build: .
     restart: unless-stopped
     ports:
