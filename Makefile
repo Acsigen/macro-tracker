@@ -32,6 +32,7 @@ build:
 
 image:
 	docker build -t $(IMAGE) .
+	docker build --platform linux/amd64 -t $(IMAGE) .
 
 push: image
 	docker push $(IMAGE)

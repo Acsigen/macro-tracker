@@ -437,12 +437,10 @@ func TestValidationSessionLifecycleConcurrent(t *testing.T) {
 	}
 	var wg sync.WaitGroup
 	for range 12 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			request(h, "GET", "/settings", "", c.Value)
 			request(h, "POST", "/logout", "csrf="+csrf, c.Value)
-		}()
+		})
 	}
 	wg.Wait()
 	if code := request(h, "GET", "/settings", "", c.Value).Code; code != 303 {

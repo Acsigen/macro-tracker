@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -487,10 +488,8 @@ func (a *app) dashboard(w http.ResponseWriter, r *http.Request) {
 
 func parseRange(r *http.Request) int {
 	days, _ := strconv.Atoi(r.URL.Query().Get("days"))
-	for _, allowed := range []int{7, 30, 90, 365} {
-		if days == allowed {
-			return days
-		}
+	if slices.Contains([]int{7, 30, 90, 365}, days) {
+		return days
 	}
 	return 30
 }
