@@ -208,6 +208,11 @@ func TestDashboardCurrentAndLatestData(t *testing.T) {
 
 func TestPWAAssets(t *testing.T) {
 	h := testApp(t).routes()
+	page := httptest.NewRecorder()
+	h.ServeHTTP(page, httptest.NewRequest("GET", "/login", nil))
+	if !strings.Contains(page.Body.String(), `rel="manifest" href="/assets/app.webmanifest" crossorigin="use-credentials"`) {
+		t.Fatal("manifest link must include Pangolin credentials")
+	}
 	res := httptest.NewRecorder()
 	h.ServeHTTP(res, httptest.NewRequest("GET", "/assets/app.webmanifest", nil))
 	if res.Code != http.StatusOK {
