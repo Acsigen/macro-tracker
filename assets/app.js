@@ -22,11 +22,26 @@ function line(name, data, color, yAxisIndex = 0) {
   return { name, type: "line", data, yAxisIndex, symbol: "circle", symbolSize: 6, connectNulls: false, lineStyle: { width: 2, color }, itemStyle: { color } };
 }
 
+const chartObservers = new Map();
+
+function disposeChart(element) {
+  chartObservers.get(element)?.disconnect();
+  chartObservers.delete(element);
+  echarts.dispose(element);
+  delete element.dataset.ready;
+}
+
 function renderCharts() {
+  for (const element of chartObservers.keys()) {
+    if (!element.isConnected) disposeChart(element);
+  }
   document.querySelectorAll(".chart").forEach((element) => {
     if (element.dataset.ready || !window.echarts) return;
     const data = JSON.parse(element.dataset.chart);
     const option = baseChart(data);
+    option.aria.label = {
+      description: element.getAttribute("aria-label") || "Health history. Missing measurements are shown as gaps."
+    };
     const color = (name) => getComputedStyle(document.documentElement).getPropertyValue(`--${name}`).trim();
     if (element.dataset.kind === "nutrition") {
       const carbohydrate = line("Carbohydrate", data.carbohydrate, color("cyan"));
@@ -59,17 +74,21 @@ function renderCharts() {
     });
     const chart = echarts.init(element);
     chart.setOption(option);
-    new ResizeObserver(() => chart.resize()).observe(element);
+    const observer = new ResizeObserver(() => chart.resize());
+    observer.observe(element);
+    chartObservers.set(element, observer);
     element.dataset.ready = "true";
   });
 }
 
 document.addEventListener("DOMContentLoaded", renderCharts);
-document.addEventListener("htmx:afterSettle", renderCharts);
+document.addEventListener("htmx:after:settle", renderCharts);
+document.addEventListener("htmx:before:cleanup", (event) => {
+  for (const element of chartObservers.keys()) {
+    if (event.target === element || event.target.contains(element)) disposeChart(element);
+  }
+});
 matchMedia("(prefers-color-scheme: light)").addEventListener("change", () => {
-  document.querySelectorAll(".chart[data-ready]").forEach((element) => {
-    echarts.dispose(element);
-    delete element.dataset.ready;
-  });
+  for (const element of chartObservers.keys()) disposeChart(element);
   renderCharts();
 });

@@ -2,7 +2,6 @@ CREATE TABLE profile (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     name TEXT NOT NULL DEFAULT '',
     height_cm REAL CHECK (height_cm IS NULL OR height_cm > 0),
-    waist_reference TEXT NOT NULL DEFAULT 'women' CHECK (waist_reference IN ('women', 'men')),
     energy_target REAL NOT NULL DEFAULT 2000 CHECK (energy_target > 0)
 );
 

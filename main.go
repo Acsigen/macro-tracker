@@ -25,8 +25,11 @@ import (
 	"syscall"
 	"time"
 	_ "time/tzdata"
+	"unicode/utf16"
+	"unicode/utf8"
 
-	_ "modernc.org/sqlite"
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 //go:embed templates/*.html assets/* migrations/*.sql VERSION
@@ -177,19 +180,8 @@ func run(cfg config) error {
 	}
 	versionBytes, _ := files.ReadFile("VERSION")
 	tpl, err := template.New("pages").Funcs(template.FuncMap{
-		"f": func(v float64) string { return strconv.FormatFloat(v, 'f', 1, 64) },
-		"ptr": func(v *float64) string {
-			if v == nil {
-				return ""
-			}
-			return strconv.FormatFloat(*v, 'f', 1, 64)
-		},
-		"pct": func(value, target float64) float64 {
-			if target == 0 {
-				return 0
-			}
-			return math.Min(100, value/target*100)
-		},
+		"f":   func(v float64) string { return strconv.FormatFloat(v, 'f', 1, 64) },
+		"ptr": optionalNumber,
 	}).ParseFS(files, "templates/*.html")
 	if err != nil {
 		return err
@@ -333,10 +325,10 @@ func (a *app) logging(next http.Handler) http.Handler {
 	})
 }
 
-func (a *app) health(w http.ResponseWriter, _ *http.Request) {
+func (a *app) health(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	status := "ok"
-	if err := a.db.Ping(); err != nil {
+	if err := a.db.PingContext(r.Context()); err != nil {
 		status = "error"
 		w.WriteHeader(http.StatusServiceUnavailable)
 	}
@@ -411,8 +403,18 @@ func (a *app) auth(next http.HandlerFunc) http.HandlerFunc {
 
 func (a *app) csrf(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			code := http.StatusBadRequest
+			var tooLarge *http.MaxBytesError
+			if errors.As(err, &tooLarge) {
+				code = http.StatusRequestEntityTooLarge
+			}
+			http.Error(w, "Invalid form", code)
+			return
+		}
 		s, ok := a.currentSession(r)
-		if !ok || r.FormValue("csrf") == "" || subtle.ConstantTimeCompare([]byte(r.FormValue("csrf")), []byte(s.csrf)) != 1 {
+		token := r.PostForm.Get("csrf")
+		if !ok || token == "" || subtle.ConstantTimeCompare([]byte(token), []byte(s.csrf)) != 1 {
 			http.Error(w, "Invalid CSRF token", http.StatusForbidden)
 			return
 		}
@@ -442,10 +444,10 @@ func (a *app) render(w http.ResponseWriter, name string, data pageData) {
 	}
 }
 
-func (a *app) getProfile() (profile, error) {
+func (a *app) getProfile(ctx context.Context) (profile, error) {
 	var p profile
 	var height sql.NullFloat64
-	err := a.db.QueryRow("SELECT name,height_cm,energy_target FROM profile WHERE id=1").Scan(&p.Name, &height, &p.EnergyTarget)
+	err := a.db.QueryRowContext(ctx, "SELECT name,height_cm,energy_target FROM profile WHERE id=1").Scan(&p.Name, &height, &p.EnergyTarget)
 	if height.Valid {
 		p.HeightCM = &height.Float64
 	}
@@ -454,25 +456,32 @@ func (a *app) getProfile() (profile, error) {
 
 func (a *app) dashboard(w http.ResponseWriter, r *http.Request) {
 	d := a.baseData(r, "Overview")
-	d.Profile, _ = a.getProfile()
 	var err error
-	if d.FoodEntries, err = a.listFoodEntries(5); err != nil {
+	if d.Profile, err = a.getProfile(r.Context()); databaseError(w, err) {
+		return
+	}
+	if d.FoodEntries, err = a.listFoodEntries(r.Context(), 5); err != nil {
 		http.Error(w, "Food entries could not be loaded", http.StatusInternalServerError)
 		return
 	}
-	if d.BodyEntries, err = a.listBody(1, d.Profile); err != nil {
+	if d.BodyEntries, err = a.listBody(r.Context(), 1, d.Profile); err != nil {
 		http.Error(w, "Body measurements could not be loaded", http.StatusInternalServerError)
 		return
 	}
-	if d.SleepEntries, err = a.listSleep(1); err != nil {
+	if d.SleepEntries, err = a.listSleep(r.Context(), 1); err != nil {
 		http.Error(w, "Sleep records could not be loaded", http.StatusInternalServerError)
 		return
 	}
-	d.Totals = dailyNutrition(a.db, d.Today)
-	today := d.Today
-	a.db.QueryRow("SELECT EXISTS(SELECT 1 FROM food_entries WHERE entry_date=?)", today).Scan(&d.Daily.Nutrition)
-	a.db.QueryRow("SELECT EXISTS(SELECT 1 FROM body_entries WHERE entry_date=?)", today).Scan(&d.Daily.Body)
-	a.db.QueryRow("SELECT EXISTS(SELECT 1 FROM sleep_entries WHERE entry_date=?)", today).Scan(&d.Daily.Sleep)
+	if d.Totals, err = dailyNutrition(r.Context(), a.db, d.Today); databaseError(w, err) {
+		return
+	}
+	err = a.db.QueryRowContext(r.Context(), `SELECT
+ EXISTS(SELECT 1 FROM food_entries WHERE entry_date=?),
+ EXISTS(SELECT 1 FROM body_entries WHERE entry_date=?),
+ EXISTS(SELECT 1 FROM sleep_entries WHERE entry_date=?)`, d.Today, d.Today, d.Today).Scan(&d.Daily.Nutrition, &d.Daily.Body, &d.Daily.Sleep)
+	if databaseError(w, err) {
+		return
+	}
 	a.render(w, "dashboard", d)
 }
 
@@ -488,15 +497,27 @@ func parseRange(r *http.Request) int {
 
 func (a *app) nutritionPage(w http.ResponseWriter, r *http.Request) {
 	d := a.baseData(r, "Nutrition")
-	d.Profile, _ = a.getProfile()
-	d.Foods, _ = a.listFoods()
-	d.FoodEntries, _ = a.listFoodEntries(100)
+	var err error
+	if d.Profile, err = a.getProfile(r.Context()); databaseError(w, err) {
+		return
+	}
+	if d.Foods, err = a.listFoods(r.Context()); databaseError(w, err) {
+		return
+	}
+	if d.FoodEntries, err = a.listFoodEntries(r.Context(), 100); databaseError(w, err) {
+		return
+	}
 	days := parseRange(r)
 	d.Range = strconv.Itoa(days)
-	labels, carbs, protein, fiber, salt, free, known := a.nutritionSeries(days)
+	labels, carbs, protein, fiber, salt, free, err := a.nutritionSeries(r.Context(), days)
+	if databaseError(w, err) {
+		return
+	}
 	t := d.Profile.EnergyTarget
-	d.ChartJSON = chartJSON(map[string]any{"labels": labels, "carbohydrate": carbs, "protein": protein, "fiber": fiber, "salt": salt, "freeSugar": free, "freeSugarKnown": known, "carbMin": t * .45 / 4, "carbMax": t * .75 / 4, "proteinMin": t * .10 / 4, "proteinMax": t * .15 / 4, "freePreferred": t * .05 / 4, "freeUpper": t * .10 / 4})
-	d.Totals = dailyNutrition(a.db, d.Today)
+	d.ChartJSON = chartJSON(map[string]any{"labels": labels, "carbohydrate": carbs, "protein": protein, "fiber": fiber, "salt": salt, "freeSugar": free, "carbMin": t * .45 / 4, "carbMax": t * .75 / 4, "proteinMin": t * .10 / 4, "proteinMax": t * .15 / 4, "freePreferred": t * .05 / 4, "freeUpper": t * .10 / 4})
+	if d.Totals, err = dailyNutrition(r.Context(), a.db, d.Today); databaseError(w, err) {
+		return
+	}
 	d.Totals.CarbMin, d.Totals.CarbMax = t*.45/4, t*.75/4
 	d.Totals.ProteinMin, d.Totals.ProteinMax = t*.10/4, t*.15/4
 	d.Totals.FreePreferred, d.Totals.FreeUpper = t*.05/4, t*.10/4
@@ -504,8 +525,8 @@ func (a *app) nutritionPage(w http.ResponseWriter, r *http.Request) {
 	a.render(w, "nutrition", d)
 }
 
-func (a *app) listFoods() ([]food, error) {
-	rows, err := a.db.Query("SELECT id,name,carbohydrate,total_sugar,free_sugar,protein,fiber,salt FROM foods ORDER BY name")
+func (a *app) listFoods(ctx context.Context) ([]food, error) {
+	rows, err := a.db.QueryContext(ctx, "SELECT id,name,carbohydrate,total_sugar,free_sugar,protein,fiber,salt FROM foods ORDER BY name")
 	if err != nil {
 		return nil, err
 	}
@@ -525,8 +546,8 @@ func (a *app) listFoods() ([]food, error) {
 	return result, rows.Err()
 }
 
-func (a *app) listFoodEntries(limit int) ([]foodEntry, error) {
-	rows, err := a.db.Query("SELECT id,COALESCE(food_id,0),entry_date,consumed_g,food_name,carbohydrate,total_sugar,free_sugar,protein,fiber,salt FROM food_entries ORDER BY entry_date DESC,id DESC LIMIT ?", limit)
+func (a *app) listFoodEntries(ctx context.Context, limit int) ([]foodEntry, error) {
+	rows, err := a.db.QueryContext(ctx, "SELECT id,COALESCE(food_id,0),entry_date,consumed_g,food_name,carbohydrate,total_sugar,free_sugar,protein,fiber,salt FROM food_entries ORDER BY entry_date DESC,id DESC LIMIT ?", limit)
 	if err != nil {
 		return nil, err
 	}
@@ -573,7 +594,51 @@ func parseID(r *http.Request) (int64, error) {
 	return id, nil
 }
 
-func validDate(value string) bool { _, err := time.Parse("2006-01-02", value); return err == nil }
+func validDate(value string) bool {
+	date, err := time.Parse("2006-01-02", value)
+	return err == nil && date.Year() > 0 && date.Format("2006-01-02") == value
+}
+
+func validName(value string) bool {
+	return utf8.ValidString(value) && len(utf16.Encode([]rune(value))) <= 120
+}
+
+func optionalNumber(value *float64) string {
+	if value == nil {
+		return ""
+	}
+	return strconv.FormatFloat(*value, 'f', -1, 64)
+}
+
+func databaseError(w http.ResponseWriter, err error) bool {
+	if err == nil {
+		return false
+	}
+	slog.Error("database", "error", err)
+	http.Error(w, "Data could not be loaded. Please try again.", http.StatusInternalServerError)
+	return true
+}
+
+func savedRecord(w http.ResponseWriter, r *http.Request, result sql.Result, err error, redirect string) {
+	if err != nil {
+		var constraint *sqlite.Error
+		if errors.As(err, &constraint) && constraint.Code() == sqlite3.SQLITE_CONSTRAINT_UNIQUE {
+			http.Error(w, "A record with that date or name already exists. Your changes were not saved.", http.StatusConflict)
+		} else {
+			http.Error(w, "Record could not be saved", http.StatusInternalServerError)
+		}
+		return
+	}
+	n, err := result.RowsAffected()
+	if databaseError(w, err) {
+		return
+	}
+	if n == 0 {
+		http.NotFound(w, r)
+		return
+	}
+	http.Redirect(w, r, redirect, http.StatusSeeOther)
+}
 
 func (a *app) saveFood(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
@@ -586,7 +651,7 @@ func (a *app) saveFood(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := strings.TrimSpace(r.FormValue("name"))
-	if name == "" || len(name) > 120 {
+	if name == "" || !validName(name) {
 		http.Error(w, "name is invalid", 400)
 		return
 	}
@@ -600,16 +665,13 @@ func (a *app) saveFood(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Nutrient values are invalid", 400)
 		return
 	}
+	var result sql.Result
 	if id == 0 {
-		_, err = a.db.Exec("INSERT INTO foods(name,carbohydrate,total_sugar,free_sugar,protein,fiber,salt) VALUES(?,?,?,?,?,?,?)", name, carb, sugar, free, protein, fiber, salt)
+		result, err = a.db.ExecContext(r.Context(), "INSERT INTO foods(name,carbohydrate,total_sugar,free_sugar,protein,fiber,salt) VALUES(?,?,?,?,?,?,?)", name, carb, sugar, free, protein, fiber, salt)
 	} else {
-		_, err = a.db.Exec("UPDATE foods SET name=?,carbohydrate=?,total_sugar=?,free_sugar=?,protein=?,fiber=?,salt=? WHERE id=?", name, carb, sugar, free, protein, fiber, salt, id)
+		result, err = a.db.ExecContext(r.Context(), "UPDATE foods SET name=?,carbohydrate=?,total_sugar=?,free_sugar=?,protein=?,fiber=?,salt=? WHERE id=?", name, carb, sugar, free, protein, fiber, salt, id)
 	}
-	if err != nil {
-		http.Error(w, "Food could not be saved", 400)
-		return
-	}
-	http.Redirect(w, r, "/nutrition", http.StatusSeeOther)
+	savedRecord(w, r, result, err, "/nutrition")
 }
 
 func (a *app) saveFoodEntry(w http.ResponseWriter, r *http.Request) {
@@ -622,8 +684,15 @@ func (a *app) saveFoodEntry(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 400)
 		return
 	}
-	foodID, err := strconv.ParseInt(r.FormValue("food_id"), 10, 64)
-	if err != nil || foodID <= 0 {
+	var foodID int64
+	if raw := r.FormValue("food_id"); raw != "" {
+		foodID, err = strconv.ParseInt(raw, 10, 64)
+		if err != nil || foodID <= 0 {
+			http.Error(w, "food is invalid", 400)
+			return
+		}
+	}
+	if id == 0 && foodID == 0 {
 		http.Error(w, "food is invalid", 400)
 		return
 	}
@@ -637,23 +706,48 @@ func (a *app) saveFoodEntry(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 400)
 		return
 	}
+	ctx := r.Context()
+	tx, err := a.db.BeginTx(ctx, nil)
+	if databaseError(w, err) {
+		return
+	}
+	defer tx.Rollback()
 	var f food
 	var free sql.NullFloat64
-	err = a.db.QueryRow("SELECT id,name,carbohydrate,total_sugar,free_sugar,protein,fiber,salt FROM foods WHERE id=?", foodID).Scan(&f.ID, &f.Name, &f.Carbohydrate, &f.TotalSugar, &free, &f.Protein, &f.Fiber, &f.Salt)
-	if err != nil {
-		http.Error(w, "food is invalid", 400)
-		return
+	if id > 0 {
+		err = tx.QueryRowContext(ctx, "SELECT COALESCE(food_id,0),food_name,carbohydrate,total_sugar,free_sugar,protein,fiber,salt FROM food_entries WHERE id=?", id).Scan(&f.ID, &f.Name, &f.Carbohydrate, &f.TotalSugar, &free, &f.Protein, &f.Fiber, &f.Salt)
+		if errors.Is(err, sql.ErrNoRows) {
+			http.NotFound(w, r)
+			return
+		}
+		if databaseError(w, err) {
+			return
+		}
 	}
+	if id == 0 || foodID != f.ID {
+		err = tx.QueryRowContext(ctx, "SELECT id,name,carbohydrate,total_sugar,free_sugar,protein,fiber,salt FROM foods WHERE id=?", foodID).Scan(&f.ID, &f.Name, &f.Carbohydrate, &f.TotalSugar, &free, &f.Protein, &f.Fiber, &f.Salt)
+		if errors.Is(err, sql.ErrNoRows) {
+			http.Error(w, "food is invalid", 400)
+			return
+		}
+		if databaseError(w, err) {
+			return
+		}
+	}
+	var sourceID any
+	if f.ID != 0 {
+		sourceID = f.ID
+	}
+	var result sql.Result
 	if id == 0 {
-		_, err = a.db.Exec("INSERT INTO food_entries(food_id,entry_date,consumed_g,food_name,carbohydrate,total_sugar,free_sugar,protein,fiber,salt) VALUES(?,?,?,?,?,?,?,?,?,?)", f.ID, date, grams, f.Name, f.Carbohydrate, f.TotalSugar, nullable(free), f.Protein, f.Fiber, f.Salt)
+		result, err = tx.ExecContext(ctx, "INSERT INTO food_entries(food_id,entry_date,consumed_g,food_name,carbohydrate,total_sugar,free_sugar,protein,fiber,salt) VALUES(?,?,?,?,?,?,?,?,?,?)", sourceID, date, grams, f.Name, f.Carbohydrate, f.TotalSugar, nullable(free), f.Protein, f.Fiber, f.Salt)
 	} else {
-		_, err = a.db.Exec("UPDATE food_entries SET food_id=?,entry_date=?,consumed_g=?,food_name=?,carbohydrate=?,total_sugar=?,free_sugar=?,protein=?,fiber=?,salt=? WHERE id=?", f.ID, date, grams, f.Name, f.Carbohydrate, f.TotalSugar, nullable(free), f.Protein, f.Fiber, f.Salt, id)
+		result, err = tx.ExecContext(ctx, "UPDATE food_entries SET food_id=?,entry_date=?,consumed_g=?,food_name=?,carbohydrate=?,total_sugar=?,free_sugar=?,protein=?,fiber=?,salt=? WHERE id=?", sourceID, date, grams, f.Name, f.Carbohydrate, f.TotalSugar, nullable(free), f.Protein, f.Fiber, f.Salt, id)
 	}
-	if err != nil {
-		http.Error(w, "Entry could not be saved", 400)
-		return
+	if err == nil {
+		err = tx.Commit()
 	}
-	http.Redirect(w, r, "/nutrition", http.StatusSeeOther)
+	savedRecord(w, r, result, err, "/nutrition")
 }
 
 func nullable(v sql.NullFloat64) any {
@@ -663,35 +757,37 @@ func nullable(v sql.NullFloat64) any {
 	return nil
 }
 
-func dailyNutrition(db *sql.DB, date string) nutritionTotals {
+func dailyNutrition(ctx context.Context, db *sql.DB, date string) (nutritionTotals, error) {
 	var carbs, sugar, protein, fiber, salt float64
 	var free sql.NullFloat64
 	var unknown int
-	db.QueryRow(`SELECT COALESCE(SUM(carbohydrate*consumed_g/100),0),COALESCE(SUM(total_sugar*consumed_g/100),0),SUM(free_sugar*consumed_g/100),COALESCE(SUM(protein*consumed_g/100),0),COALESCE(SUM(fiber*consumed_g/100),0),COALESCE(SUM(salt*consumed_g/100),0),COALESCE(SUM(free_sugar IS NULL),0) FROM food_entries WHERE entry_date=?`, date).Scan(&carbs, &sugar, &free, &protein, &fiber, &salt, &unknown)
+	err := db.QueryRowContext(ctx, `SELECT COALESCE(SUM(carbohydrate*consumed_g/100),0),COALESCE(SUM(total_sugar*consumed_g/100),0),SUM(free_sugar*consumed_g/100),COALESCE(SUM(protein*consumed_g/100),0),COALESCE(SUM(fiber*consumed_g/100),0),COALESCE(SUM(salt*consumed_g/100),0),COALESCE(SUM(free_sugar IS NULL),0) FROM food_entries WHERE entry_date=?`, date).Scan(&carbs, &sugar, &free, &protein, &fiber, &salt, &unknown)
+	if err != nil {
+		return nutritionTotals{}, err
+	}
 	result := nutritionTotals{Carbohydrate: carbs, TotalSugar: sugar, Protein: protein, Fiber: fiber, Salt: salt}
 	if free.Valid && unknown == 0 {
 		result.FreeSugar = &free.Float64
 	}
-	return result
+	return result, nil
 }
 
-func (a *app) nutritionSeries(days int) ([]string, []float64, []float64, []float64, []float64, []any, []bool) {
+func (a *app) nutritionSeries(ctx context.Context, days int) ([]string, []float64, []float64, []float64, []float64, []any, error) {
 	labels := dateLabels(time.Now().In(a.location), days)
 	carbs := make([]float64, days)
 	protein := make([]float64, days)
 	fiber := make([]float64, days)
 	salt := make([]float64, days)
 	free := make([]any, days)
-	known := make([]bool, days)
 	index := map[string]int{}
 	for i, v := range labels {
 		index[v] = i
 		free[i] = nil
 	}
 	start := labels[0]
-	rows, err := a.db.Query(`SELECT entry_date,SUM(carbohydrate*consumed_g/100),SUM(protein*consumed_g/100),SUM(fiber*consumed_g/100),SUM(salt*consumed_g/100),SUM(free_sugar*consumed_g/100),SUM(free_sugar IS NULL) FROM food_entries WHERE entry_date>=? GROUP BY entry_date`, start)
+	rows, err := a.db.QueryContext(ctx, `SELECT entry_date,SUM(carbohydrate*consumed_g/100),SUM(protein*consumed_g/100),SUM(fiber*consumed_g/100),SUM(salt*consumed_g/100),SUM(free_sugar*consumed_g/100),SUM(free_sugar IS NULL) FROM food_entries WHERE entry_date>=? GROUP BY entry_date`, start)
 	if err != nil {
-		return labels, carbs, protein, fiber, salt, free, known
+		return labels, carbs, protein, fiber, salt, free, err
 	}
 	defer rows.Close()
 	for rows.Next() {
@@ -700,7 +796,7 @@ func (a *app) nutritionSeries(days int) ([]string, []float64, []float64, []float
 		var fr sql.NullFloat64
 		var unknown int
 		if err := rows.Scan(&date, &c, &p, &fi, &s, &fr, &unknown); err != nil {
-			return labels, carbs, protein, fiber, salt, free, known
+			return labels, carbs, protein, fiber, salt, free, err
 		}
 		if i, ok := index[date]; ok {
 			carbs[i] = c
@@ -709,14 +805,10 @@ func (a *app) nutritionSeries(days int) ([]string, []float64, []float64, []float
 			salt[i] = s
 			if fr.Valid && unknown == 0 {
 				free[i] = fr.Float64
-				known[i] = true
 			}
 		}
 	}
-	if rows.Err() != nil {
-		return labels, carbs, protein, fiber, salt, free, known
-	}
-	return labels, carbs, protein, fiber, salt, free, known
+	return labels, carbs, protein, fiber, salt, free, rows.Err()
 }
 
 func dateLabels(now time.Time, days int) []string {
@@ -730,11 +822,19 @@ func chartJSON(v any) string { b, _ := json.Marshal(v); return string(b) }
 
 func (a *app) bodyPage(w http.ResponseWriter, r *http.Request) {
 	d := a.baseData(r, "Body")
-	d.Profile, _ = a.getProfile()
+	var err error
+	if d.Profile, err = a.getProfile(r.Context()); databaseError(w, err) {
+		return
+	}
 	days := parseRange(r)
 	d.Range = strconv.Itoa(days)
-	d.BodyEntries, _ = a.listBody(100, d.Profile)
-	labels, weight, bmis, waists := a.bodySeries(days, d.Profile)
+	if d.BodyEntries, err = a.listBody(r.Context(), 100, d.Profile); databaseError(w, err) {
+		return
+	}
+	labels, weight, bmis, waists, err := a.bodySeries(r.Context(), days, d.Profile)
+	if databaseError(w, err) {
+		return
+	}
 	var waistTarget *float64
 	if d.Profile.HeightCM != nil {
 		v := *d.Profile.HeightCM / 2
@@ -745,8 +845,8 @@ func (a *app) bodyPage(w http.ResponseWriter, r *http.Request) {
 	a.render(w, "body", d)
 }
 
-func (a *app) listBody(limit int, p profile) ([]bodyEntry, error) {
-	rows, err := a.db.Query("SELECT id,entry_date,weight_kg,waist_cm FROM body_entries ORDER BY entry_date DESC LIMIT ?", limit)
+func (a *app) listBody(ctx context.Context, limit int, p profile) ([]bodyEntry, error) {
+	rows, err := a.db.QueryContext(ctx, "SELECT id,entry_date,weight_kg,waist_cm FROM body_entries ORDER BY entry_date DESC LIMIT ?", limit)
 	if err != nil {
 		return nil, err
 	}
@@ -812,28 +912,16 @@ func (a *app) saveBody(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Measurements are invalid", 400)
 		return
 	}
-	tx, err := a.db.Begin()
-	if err == nil && id > 0 {
-		_, err = tx.Exec("DELETE FROM body_entries WHERE id=?", id)
+	var result sql.Result
+	if id > 0 {
+		result, err = a.db.ExecContext(r.Context(), "UPDATE body_entries SET entry_date=?,weight_kg=?,waist_cm=? WHERE id=?", date, weight, waist, id)
+	} else {
+		result, err = a.db.ExecContext(r.Context(), `INSERT INTO body_entries(entry_date,weight_kg,waist_cm) VALUES(?,?,?) ON CONFLICT(entry_date) DO UPDATE SET weight_kg=excluded.weight_kg,waist_cm=excluded.waist_cm`, date, weight, waist)
 	}
-	if err == nil {
-		_, err = tx.Exec(`INSERT INTO body_entries(entry_date,weight_kg,waist_cm) VALUES(?,?,?) ON CONFLICT(entry_date) DO UPDATE SET weight_kg=excluded.weight_kg,waist_cm=excluded.waist_cm`, date, weight, waist)
-	}
-	if err != nil {
-		if tx != nil {
-			tx.Rollback()
-		}
-		http.Error(w, "Entry could not be saved", 400)
-		return
-	}
-	if err = tx.Commit(); err != nil {
-		http.Error(w, "Entry could not be saved", 500)
-		return
-	}
-	http.Redirect(w, r, "/body", 303)
+	savedRecord(w, r, result, err, "/body")
 }
 
-func (a *app) bodySeries(days int, p profile) ([]string, []any, []any, []any) {
+func (a *app) bodySeries(ctx context.Context, days int, p profile) ([]string, []any, []any, []any, error) {
 	labels := dateLabels(time.Now().In(a.location), days)
 	weight := make([]any, days)
 	bmis := make([]any, days)
@@ -842,16 +930,16 @@ func (a *app) bodySeries(days int, p profile) ([]string, []any, []any, []any) {
 	for i, v := range labels {
 		idx[v] = i
 	}
-	rows, err := a.db.Query("SELECT entry_date,weight_kg,waist_cm FROM body_entries WHERE entry_date>=?", labels[0])
+	rows, err := a.db.QueryContext(ctx, "SELECT entry_date,weight_kg,waist_cm FROM body_entries WHERE entry_date>=?", labels[0])
 	if err != nil {
-		return labels, weight, bmis, waists
+		return labels, weight, bmis, waists, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var date string
 		var w, waist float64
 		if err := rows.Scan(&date, &w, &waist); err != nil {
-			return labels, weight, bmis, waists
+			return labels, weight, bmis, waists, err
 		}
 		if i, ok := idx[date]; ok {
 			weight[i] = w
@@ -861,24 +949,27 @@ func (a *app) bodySeries(days int, p profile) ([]string, []any, []any, []any) {
 			}
 		}
 	}
-	if rows.Err() != nil {
-		return labels, weight, bmis, waists
-	}
-	return labels, weight, bmis, waists
+	return labels, weight, bmis, waists, rows.Err()
 }
 
 func (a *app) sleepPage(w http.ResponseWriter, r *http.Request) {
 	d := a.baseData(r, "Sleep")
+	var err error
 	days := parseRange(r)
 	d.Range = strconv.Itoa(days)
-	d.SleepEntries, _ = a.listSleep(100)
-	labels, hours := a.sleepSeries(days)
+	if d.SleepEntries, err = a.listSleep(r.Context(), 100); databaseError(w, err) {
+		return
+	}
+	labels, hours, err := a.sleepSeries(r.Context(), days)
+	if databaseError(w, err) {
+		return
+	}
 	d.ChartJSON = chartJSON(map[string]any{"labels": labels, "hours": hours})
 	d.Summary = fmt.Sprintf("The chart shows %d days of sleep duration. It does not show a health band.", days)
 	a.render(w, "sleep", d)
 }
-func (a *app) listSleep(limit int) ([]sleepEntry, error) {
-	rows, err := a.db.Query("SELECT id,entry_date,bed_time,wake_time,duration_hours FROM sleep_entries ORDER BY entry_date DESC LIMIT ?", limit)
+func (a *app) listSleep(ctx context.Context, limit int) ([]sleepEntry, error) {
+	rows, err := a.db.QueryContext(ctx, "SELECT id,entry_date,bed_time,wake_time,duration_hours FROM sleep_entries ORDER BY entry_date DESC LIMIT ?", limit)
 	if err != nil {
 		return nil, err
 	}
@@ -894,24 +985,37 @@ func (a *app) listSleep(limit int) ([]sleepEntry, error) {
 	return out, rows.Err()
 }
 func sleepDuration(bed, wake string) (float64, error) {
-	b, err := time.Parse("15:04", bed)
-	if err != nil {
-		return 0, err
+	return sleepDurationOn("2000-01-02", bed, wake, time.UTC)
+}
+
+func sleepDurationOn(date, bed, wake string, location *time.Location) (float64, error) {
+	if !validDate(date) {
+		return 0, errors.New("date is invalid")
 	}
-	w, err := time.Parse("15:04", wake)
-	if err != nil {
-		return 0, err
+	for _, clock := range []string{bed, wake} {
+		parsed, err := time.Parse("15:04", clock)
+		if err != nil || parsed.Format("15:04") != clock {
+			return 0, errors.New("time is invalid")
+		}
 	}
-	d := w.Sub(b)
-	if d <= 0 {
-		d += 24 * time.Hour
+	bedDate := date
+	if bed >= wake {
+		day, _ := time.Parse("2006-01-02", date)
+		bedDate = day.AddDate(0, 0, -1).Format("2006-01-02")
 	}
-	hours := d.Hours()
+	layout := "2006-01-02 15:04"
+	b, e1 := time.ParseInLocation(layout, bedDate+" "+bed, location)
+	w, e2 := time.ParseInLocation(layout, date+" "+wake, location)
+	if e1 != nil || e2 != nil || b.Format(layout) != bedDate+" "+bed || w.Format(layout) != date+" "+wake {
+		return 0, errors.New("time does not exist in the configured timezone")
+	}
+	hours := w.Sub(b).Hours()
 	if hours <= 0 || hours > 24 {
-		return 0, errors.New("duration is invalid")
+		return 0, errors.New("sleep must last more than zero and at most 24 hours")
 	}
 	return hours, nil
 }
+
 func (a *app) saveSleep(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "Invalid form", 400)
@@ -928,62 +1032,50 @@ func (a *app) saveSleep(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	bed, wake := r.FormValue("bed_time"), r.FormValue("wake_time")
-	duration, err := sleepDuration(bed, wake)
+	duration, err := sleepDurationOn(date, bed, wake, a.location)
 	if err != nil {
-		http.Error(w, "Sleep times are invalid", 400)
+		http.Error(w, "Sleep times are invalid: "+err.Error(), 400)
 		return
 	}
-	tx, err := a.db.Begin()
-	if err == nil && id > 0 {
-		_, err = tx.Exec("DELETE FROM sleep_entries WHERE id=?", id)
+	var result sql.Result
+	if id > 0 {
+		result, err = a.db.ExecContext(r.Context(), "UPDATE sleep_entries SET entry_date=?,bed_time=?,wake_time=?,duration_hours=? WHERE id=?", date, bed, wake, duration, id)
+	} else {
+		result, err = a.db.ExecContext(r.Context(), `INSERT INTO sleep_entries(entry_date,bed_time,wake_time,duration_hours) VALUES(?,?,?,?) ON CONFLICT(entry_date) DO UPDATE SET bed_time=excluded.bed_time,wake_time=excluded.wake_time,duration_hours=excluded.duration_hours`, date, bed, wake, duration)
 	}
-	if err == nil {
-		_, err = tx.Exec(`INSERT INTO sleep_entries(entry_date,bed_time,wake_time,duration_hours) VALUES(?,?,?,?) ON CONFLICT(entry_date) DO UPDATE SET bed_time=excluded.bed_time,wake_time=excluded.wake_time,duration_hours=excluded.duration_hours`, date, bed, wake, duration)
-	}
-	if err != nil {
-		if tx != nil {
-			tx.Rollback()
-		}
-		http.Error(w, "Entry could not be saved", 400)
-		return
-	}
-	if err = tx.Commit(); err != nil {
-		http.Error(w, "Entry could not be saved", 500)
-		return
-	}
-	http.Redirect(w, r, "/sleep", 303)
+	savedRecord(w, r, result, err, "/sleep")
 }
-func (a *app) sleepSeries(days int) ([]string, []any) {
+func (a *app) sleepSeries(ctx context.Context, days int) ([]string, []any, error) {
 	labels := dateLabels(time.Now().In(a.location), days)
 	hours := make([]any, days)
 	idx := map[string]int{}
 	for i, v := range labels {
 		idx[v] = i
 	}
-	rows, err := a.db.Query("SELECT entry_date,duration_hours FROM sleep_entries WHERE entry_date>=?", labels[0])
+	rows, err := a.db.QueryContext(ctx, "SELECT entry_date,duration_hours FROM sleep_entries WHERE entry_date>=?", labels[0])
 	if err != nil {
-		return labels, hours
+		return labels, hours, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var date string
 		var h float64
 		if err := rows.Scan(&date, &h); err != nil {
-			return labels, hours
+			return labels, hours, err
 		}
 		if i, ok := idx[date]; ok {
 			hours[i] = h
 		}
 	}
-	if rows.Err() != nil {
-		return labels, hours
-	}
-	return labels, hours
+	return labels, hours, rows.Err()
 }
 
 func (a *app) settingsPage(w http.ResponseWriter, r *http.Request) {
 	d := a.baseData(r, "Settings")
-	d.Profile, _ = a.getProfile()
+	var err error
+	if d.Profile, err = a.getProfile(r.Context()); databaseError(w, err) {
+		return
+	}
 	a.render(w, "settings", d)
 }
 func (a *app) saveSettings(w http.ResponseWriter, r *http.Request) {
@@ -992,7 +1084,7 @@ func (a *app) saveSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := strings.TrimSpace(r.FormValue("name"))
-	if len(name) > 120 {
+	if !validName(name) {
 		http.Error(w, "name is invalid", 400)
 		return
 	}
@@ -1006,11 +1098,8 @@ func (a *app) saveSettings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "energy target is invalid", 400)
 		return
 	}
-	if _, err = a.db.Exec("UPDATE profile SET name=?,height_cm=?,energy_target=? WHERE id=1", name, height, energy); err != nil {
-		http.Error(w, "Settings could not be saved", 500)
-		return
-	}
-	http.Redirect(w, r, "/settings", 303)
+	result, err := a.db.ExecContext(r.Context(), "UPDATE profile SET name=?,height_cm=?,energy_target=? WHERE id=1", name, height, energy)
+	savedRecord(w, r, result, err, "/settings")
 }
 
 func (a *app) deletePage(kind string) http.HandlerFunc {
@@ -1047,7 +1136,7 @@ func (a *app) deleteRecord(table, redirect string) http.HandlerFunc {
 			http.Error(w, "invalid record", 400)
 			return
 		}
-		result, err := a.db.Exec("DELETE FROM "+table+" WHERE id=?", id)
+		result, err := a.db.ExecContext(r.Context(), "DELETE FROM "+table+" WHERE id=?", id)
 		if err != nil {
 			http.Error(w, "Record could not be deleted", 500)
 			return

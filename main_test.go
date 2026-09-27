@@ -32,8 +32,7 @@ func testApp(t *testing.T) *app {
 	t.Cleanup(func() { db.Close() })
 	tpl, err := template.New("pages").Funcs(template.FuncMap{
 		"f":   func(v float64) string { return fmt.Sprintf("%.1f", v) },
-		"ptr": func(*float64) string { return "" },
-		"pct": func(float64, float64) float64 { return 0 },
+		"ptr": optionalNumber,
 	}).ParseFS(files, "templates/*.html")
 	if err != nil {
 		t.Fatal(err)
@@ -84,7 +83,7 @@ func TestNutritionScalingAndUnknownFreeSugar(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	totals := dailyNutrition(a.db, "2026-09-26")
+	totals := mustDailyNutrition(t, a.db, "2026-09-26")
 	if totals.Carbohydrate != 140 || totals.Protein != 60 || totals.FreeSugar != nil {
 		t.Fatalf("unexpected totals: %#v", totals)
 	}
