@@ -9,10 +9,10 @@
   <link rel="manifest" href="/assets/app.webmanifest" crossorigin="use-credentials">
   <link rel="icon" href="/assets/icon-192.png">
   <title>{{.Title}} · Macro Tracker</title>
-  <link rel="stylesheet" href="/assets/app.css">
+  <link rel="stylesheet" href="/assets/app.css?v={{.Version}}">
   <script defer src="/assets/htmx.min.js"></script>
   <script defer src="/assets/echarts.min.js"></script>
-  <script defer src="/assets/app.js"></script>
+  <script defer src="/assets/app.js?v={{.Version}}"></script>
 </head>
 <body hx-boost:inherited="true">
   <a class="skip" href="#main">Skip to content</a>
@@ -52,7 +52,7 @@
   <link rel="manifest" href="/assets/app.webmanifest" crossorigin="use-credentials">
   <link rel="icon" href="/assets/icon-192.png">
   <title>Access · Macro Tracker</title>
-  <link rel="stylesheet" href="/assets/app.css">
+  <link rel="stylesheet" href="/assets/app.css?v={{.Version}}">
 </head>
 <body class="login-screen">
   <main class="login-panel">
@@ -77,7 +77,7 @@
   <section class="overview-cards" aria-label="Latest health data">
     <article class="panel overview-card">
       <div class="section-head"><h2>Nutrition</h2><span class="status {{if .Daily.Nutrition}}done{{end}}">{{if .Daily.Nutrition}}Logged today{{else}}Not logged today{{end}}</span></div>
-      {{if .Daily.Nutrition}}<p class="reading">{{f .Totals.Carbohydrate}} <span>g carbs</span></p><p>{{f .Totals.Protein}} g protein · {{f .Totals.Fiber}} g fiber</p>{{else}}<p class="reading empty-reading">No food logged</p><p>Add a food entry to see today’s totals.</p>{{end}}
+      {{if .Daily.Nutrition}}<p class="reading">{{f .Totals.Carbohydrate}} <span>g carbs</span></p><p>{{f .Totals.Protein}} g protein · {{if .Totals.Fat}}{{f .Totals.Fat}} g fat{{else}}fat unknown{{end}}</p>{{else}}<p class="reading empty-reading">No food logged</p><p>Add a food entry to see today’s totals.</p>{{end}}
       <a href="/nutrition#add-entry">Log food <svg class="link-arrow" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-6-6 6 6-6 6"/></svg></a>
     </article>
     <article class="panel overview-card">
@@ -98,9 +98,9 @@
       <dl class="nutrition-breakdown">
         <div><dt>Carbohydrate</dt><dd>{{f .Totals.Carbohydrate}} <span>g</span></dd></div>
         <div><dt>Protein</dt><dd>{{f .Totals.Protein}} <span>g</span></dd></div>
+        <div><dt>Fat</dt><dd>{{if .Totals.Fat}}{{f .Totals.Fat}} <span>g</span>{{else}}Unknown{{end}}</dd></div>
         <div><dt>Fiber</dt><dd>{{f .Totals.Fiber}} <span>g</span></dd></div>
         <div><dt>Total sugar</dt><dd>{{f .Totals.TotalSugar}} <span>g</span></dd></div>
-        <div><dt>Free sugar</dt><dd>{{if .Totals.FreeSugar}}{{f .Totals.FreeSugar}} <span>g</span>{{else}}Unknown{{end}}</dd></div>
         <div><dt>Salt</dt><dd>{{f .Totals.Salt}} <span>g</span></dd></div>
       </dl>
       {{else}}<div class="empty-state"><h3>Your daily totals start here</h3><p>Save a food, then log the amount you eat. Your nutrition totals appear here.</p><a class="button secondary" href="/nutrition#add-entry">Log food</a></div>{{end}}
@@ -128,20 +128,20 @@
   <div class="section-head"><h2>Today’s totals</h2><time>{{.Today}}</time></div>
   <section class="metric-grid" aria-label="Today’s totals">
     <article><span>Carbohydrate</span><strong>{{f .Totals.Carbohydrate}} g</strong><small>{{f .Totals.CarbMin}}–{{f .Totals.CarbMax}} g band</small></article>
-    <article><span>Total sugar</span><strong>{{f .Totals.TotalSugar}} g</strong></article>
-    <article><span>Free sugar</span><strong>{{if .Totals.FreeSugar}}{{f .Totals.FreeSugar}} g{{else}}Unknown{{end}}</strong><small>{{f .Totals.FreePreferred}} g preferred · {{f .Totals.FreeUpper}} g upper</small></article>
+    <article><span>Total sugar</span><strong>{{f .Totals.TotalSugar}} g</strong><small>25 g personal limit</small></article>
     <article><span>Protein</span><strong>{{f .Totals.Protein}} g</strong><small>{{f .Totals.ProteinMin}}–{{f .Totals.ProteinMax}} g band</small></article>
+    <article><span>Fat</span><strong>{{if .Totals.Fat}}{{f .Totals.Fat}} g{{else}}Unknown{{end}}</strong><small>{{f .Totals.FatMin}}–{{f .Totals.FatMax}} g band</small></article>
     <article><span>Fiber</span><strong>{{f .Totals.Fiber}} g</strong><small>25 g minimum</small></article>
     <article><span>Salt</span><strong>{{f .Totals.Salt}} g</strong><small>5 g maximum</small></article>
   </section>
 
   <div class="tracking-grid"><section class="panel entry-panel" id="add-entry"><h2>Add food entry</h2>{{if .Foods}}<form action="/nutrition/entries" method="post" class="stack"><input type="hidden" name="csrf" value="{{.CSRF}}"><label>Date<input type="date" name="entry_date" value="{{.Today}}" required></label><label>Saved food<select name="food_id" required><option value="">Select a food</option>{{range .Foods}}<option value="{{.ID}}">{{.Name}}</option>{{end}}</select></label><label>Amount eaten (g)<input type="number" name="consumed_g" min="0.01" max="100000" step="0.01" required></label><button>Log food</button></form>{{else}}<p>Save a food in the <a href="#food-library">food library</a> before you log an entry.</p>{{end}}</section>
-    <section class="panel chart-panel"><h2>Nutrition trends</h2><div class="chart" data-kind="nutrition" data-chart="{{.ChartJSON}}" role="img" aria-label="{{.Summary}}"></div><p class="chart-summary">{{.Summary}} Missing free-sugar data appears as a gap, not zero. Read the <a href="https://www.who.int/news-room/fact-sheets/detail/healthy-diet">WHO healthy diet guidance</a>.</p></section></div>
+    <section class="panel chart-panel"><h2>Nutrition trends</h2><div class="chart" data-kind="nutrition" data-chart="{{.ChartJSON}}" role="img" aria-label="{{.Summary}}"></div><p class="chart-summary">{{.Summary}} The 25 g total-sugar line is a personal limit. Missing fat data appears as a gap, not zero. Read the <a href="https://www.who.int/news-room/fact-sheets/detail/healthy-diet">WHO healthy diet guidance</a>.</p></section></div>
   <div class="content-grid">
-    <details class="panel food-editor" id="food-library" {{if not .Foods}}open{{end}}><summary><span><strong>Add to food library</strong><small>Nutrition values in grams per 100 g of food</small></span><span aria-hidden="true">+</span></summary><form action="/nutrition/foods" method="post" class="form-grid"><input type="hidden" name="csrf" value="{{.CSRF}}"><label class="wide">Food name<input name="name" maxlength="120" required></label><label>Carbohydrate<input type="number" name="carbohydrate" min="0" max="100" step="0.01" required></label><label>Total sugar<input type="number" name="total_sugar" min="0" max="100" step="0.01" required></label><label>Free sugar <small>optional</small><input type="number" name="free_sugar" min="0" max="100" step="0.01"></label><label>Protein<input type="number" name="protein" min="0" max="100" step="0.01" required></label><label>Fiber<input type="number" name="fiber" min="0" max="100" step="0.01" required></label><label>Salt<input type="number" name="salt" min="0" max="100" step="0.01" required></label><button class="wide">Save food</button></form></details>
+    <details class="panel food-editor" id="food-library" {{if not .Foods}}open{{end}}><summary><span><strong>Add to food library</strong><small>Nutrition values in grams per 100 g of food</small></span><span aria-hidden="true">+</span></summary><form action="/nutrition/foods" method="post" class="form-grid"><input type="hidden" name="csrf" value="{{.CSRF}}"><label class="wide">Food name<input name="name" maxlength="120" required></label><label>Carbohydrate<input type="number" name="carbohydrate" min="0" max="100" step="0.01" required></label><label>Total sugar<input type="number" name="total_sugar" min="0" max="100" step="0.01" required></label><label>Protein<input type="number" name="protein" min="0" max="100" step="0.01" required></label><label>Fat<input type="number" name="fat" min="0" max="100" step="0.01" required></label><label>Fiber<input type="number" name="fiber" min="0" max="100" step="0.01" required></label><label>Salt<input type="number" name="salt" min="0" max="100" step="0.01" required></label><button class="wide">Save food</button></form></details>
   </div>
   <section class="panel records"><h2 id="recent-entries">Recent entries</h2>{{if .FoodEntries}}{{range .FoodEntries}}{{$entry := .}}<details><summary><span><strong>{{.FoodName}}</strong><small>{{.Date}} · {{f .ConsumedG}} g</small></span><span>{{f .Carbohydrate}} g carbs / 100 g</span></summary><form id="entry-{{.ID}}" action="/nutrition/entries/{{.ID}}" method="post" class="inline-edit"><input type="hidden" name="csrf" value="{{$.CSRF}}"><label>Date<input type="date" name="entry_date" value="{{.Date}}" required></label><label>Food<select name="food_id" {{if .FoodID}}required{{end}}>{{if not .FoodID}}<option value="" selected>{{.FoodName}} (saved entry)</option>{{end}}{{range $.Foods}}<option value="{{.ID}}" {{if eq .ID $entry.FoodID}}selected{{end}}>{{.Name}}</option>{{end}}</select></label><label>Amount (g)<input type="number" name="consumed_g" value="{{.ConsumedG}}" min="0.01" max="100000" step="0.01" required></label><button>Save changes</button><a class="danger-link" href="/nutrition/entries/{{.ID}}/delete">Delete</a></form></details>{{end}}{{else}}<p>No food entries yet.</p>{{end}}</section>
-  <section class="panel records"><h2>Food library</h2>{{if .Foods}}{{range .Foods}}<details><summary><span><strong>{{.Name}}</strong><small>{{f .Carbohydrate}} g carbohydrate · {{f .Protein}} g protein</small></span><span>Edit</span></summary><form action="/nutrition/foods/{{.ID}}" method="post" class="form-grid"><input type="hidden" name="csrf" value="{{$.CSRF}}"><label class="wide">Food name<input name="name" value="{{.Name}}" maxlength="120" required></label><label>Carbohydrate<input type="number" name="carbohydrate" value="{{.Carbohydrate}}" min="0" max="100" step="0.01" required></label><label>Total sugar<input type="number" name="total_sugar" value="{{.TotalSugar}}" min="0" max="100" step="0.01" required></label><label>Free sugar<input type="number" name="free_sugar" value="{{ptr .FreeSugar}}" min="0" max="100" step="0.01"></label><label>Protein<input type="number" name="protein" value="{{.Protein}}" min="0" max="100" step="0.01" required></label><label>Fiber<input type="number" name="fiber" value="{{.Fiber}}" min="0" max="100" step="0.01" required></label><label>Salt<input type="number" name="salt" value="{{.Salt}}" min="0" max="100" step="0.01" required></label><button>Save changes</button><a class="danger-link" href="/nutrition/foods/{{.ID}}/delete">Delete</a></form></details>{{end}}{{else}}<p>No saved foods yet.</p>{{end}}</section>
+  <section class="panel records"><h2>Food library</h2>{{if .Foods}}{{range .Foods}}<details><summary><span><strong>{{.Name}}</strong><small>{{f .Carbohydrate}} g carbohydrate · {{f .Protein}} g protein · {{if .Fat}}{{f .Fat}} g fat{{else}}fat unknown{{end}}</small></span><span>Edit</span></summary><form action="/nutrition/foods/{{.ID}}" method="post" class="form-grid"><input type="hidden" name="csrf" value="{{$.CSRF}}"><label class="wide">Food name<input name="name" value="{{.Name}}" maxlength="120" required></label><label>Carbohydrate<input type="number" name="carbohydrate" value="{{.Carbohydrate}}" min="0" max="100" step="0.01" required></label><label>Total sugar<input type="number" name="total_sugar" value="{{.TotalSugar}}" min="0" max="100" step="0.01" required></label><label>Protein<input type="number" name="protein" value="{{.Protein}}" min="0" max="100" step="0.01" required></label><label>Fat<input type="number" name="fat" value="{{ptr .Fat}}" min="0" max="100" step="0.01" required></label><label>Fiber<input type="number" name="fiber" value="{{.Fiber}}" min="0" max="100" step="0.01" required></label><label>Salt<input type="number" name="salt" value="{{.Salt}}" min="0" max="100" step="0.01" required></label><button>Save changes</button><a class="danger-link" href="/nutrition/foods/{{.ID}}/delete">Delete</a></form></details>{{end}}{{else}}<p>No saved foods yet.</p>{{end}}</section>
 {{template "bottom" .}}{{end}}
 
 {{define "body"}}{{template "top" .}}

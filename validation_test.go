@@ -11,8 +11,6 @@ import (
 	"net/url"
 	"path/filepath"
 	"reflect"
-	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -41,7 +39,7 @@ func request(h http.Handler, method, path, body, token string) *httptest.Respons
 }
 
 func foodForm() url.Values {
-	return url.Values{"csrf": {"csrf"}, "name": {"Oats"}, "carbohydrate": {"60"}, "total_sugar": {"10"}, "free_sugar": {"0"}, "protein": {"12"}, "fiber": {"10"}, "salt": {"0"}}
+	return url.Values{"csrf": {"csrf"}, "name": {"Oats"}, "carbohydrate": {"60"}, "total_sugar": {"10"}, "protein": {"12"}, "fat": {"7"}, "fiber": {"10"}, "salt": {"0"}}
 }
 
 func entryForm() url.Values {
@@ -162,21 +160,20 @@ func TestValidationMissingUpdateDoesNotSucceed(t *testing.T) {
 	}
 }
 
-func TestValidationAmountEditPreservesSnapshot(t *testing.T) {
+func TestValidationAmountEditUsesLibraryValues(t *testing.T) {
 	a := testApp(t)
 	h := a.routes()
 	doForm(t, h, "POST", "/nutrition/foods", foodForm(), true, 303)
 	doForm(t, h, "POST", "/nutrition/entries", entryForm(), true, 303)
 	v := foodForm()
 	v.Set("carbohydrate", "30")
-	v.Set("free_sugar", "")
 	doForm(t, h, "POST", "/nutrition/foods/1", v, true, 303)
 	e := entryForm()
 	e.Set("consumed_g", "200")
 	doForm(t, h, "POST", "/nutrition/entries/1", e, true, 303)
 	got := mustDailyNutrition(t, a.db, "2026-01-01")
-	if got.Carbohydrate != 120 || got.FreeSugar == nil || *got.FreeSugar != 0 {
-		t.Fatalf("amount-only edit changed historical nutrient values: %+v; want 120g carbohydrate and known zero free sugar", got)
+	if got.Carbohydrate != 60 || got.Fat == nil || *got.Fat != 14 {
+		t.Fatalf("amount edit did not use library nutrients: %+v", got)
 	}
 }
 
@@ -284,53 +281,53 @@ func TestValidationNutritionRandomizedModel(t *testing.T) {
 			rng := rand.New(rand.NewSource(seed))
 			now := time.Now().In(a.location)
 			type total struct {
-				c, s, p, f, salt, free float64
-				count, unknown         int
+				c, s, p, fat, fiber, salt float64
+				count, unknown            int
 			}
 			model := map[string]total{}
 			for i := range 150 {
 				date := now.AddDate(0, 0, rng.Intn(12)-9).Format("2006-01-02")
-				c, s, p, f, salt := float64(rng.Intn(101)), float64(rng.Intn(11)), float64(rng.Intn(101)), float64(rng.Intn(101)), float64(rng.Intn(101))
+				c, s, p, fa, fiber, salt := float64(rng.Intn(101)), float64(rng.Intn(11)), float64(rng.Intn(101)), float64(rng.Intn(101)), float64(rng.Intn(101)), float64(rng.Intn(101))
 				s = math.Min(s, c)
 				grams := float64(25 * (1 + rng.Intn(8)))
-				var free any
+				var fat any
 				m := model[date]
 				if i%7 == 0 {
 					m.unknown++
 				} else {
-					free = s / 2
-					m.free += s / 2 * grams / 100
+					fat = fa
+					m.fat += fa * grams / 100
 				}
-				execSQL(t, a.db, `INSERT INTO food_entries(entry_date,consumed_g,food_name,carbohydrate,total_sugar,free_sugar,protein,fiber,salt) VALUES(?,?,'Snapshot',?,?,?,?,?,?)`, date, grams, c, s, free, p, f, salt)
+				execSQL(t, a.db, `INSERT INTO food_entries(entry_date,consumed_g,food_name,carbohydrate,total_sugar,protein,fat,fiber,salt) VALUES(?,?,'Snapshot',?,?,?,?,?,?)`, date, grams, c, s, p, fat, fiber, salt)
 				m.c += c * grams / 100
 				m.s += s * grams / 100
 				m.p += p * grams / 100
-				m.f += f * grams / 100
+				m.fiber += fiber * grams / 100
 				m.salt += salt * grams / 100
 				m.count++
 				model[date] = m
 			}
-			labels, c, p, f, salt, free, err := a.nutritionSeries(context.Background(), 7)
+			labels, c, sugar, p, fat, f, salt, err := a.nutritionSeries(context.Background(), 7)
 			if err != nil {
 				t.Fatal(err)
 			}
 			for i, date := range labels {
 				m := model[date]
 				d := mustDailyNutrition(t, a.db, date)
-				got := []float64{c[i], p[i], f[i], salt[i], d.Carbohydrate, d.TotalSugar, d.Protein, d.Fiber, d.Salt}
-				want := []float64{m.c, m.p, m.f, m.salt, m.c, m.s, m.p, m.f, m.salt}
+				got := []float64{c[i], sugar[i], p[i], f[i], salt[i], d.Carbohydrate, d.TotalSugar, d.Protein, d.Fiber, d.Salt}
+				want := []float64{m.c, m.s, m.p, m.fiber, m.salt, m.c, m.s, m.p, m.fiber, m.salt}
 				if !reflect.DeepEqual(got, want) {
 					t.Fatalf("date %s: got %v want %v", date, got, want)
 				}
 				wantKnown := m.count > 0 && m.unknown == 0
-				if (free[i] != nil) != wantKnown || (d.FreeSugar != nil) != wantKnown {
+				if (fat[i] != nil) != wantKnown || (d.Fat != nil) != wantKnown {
 					t.Fatalf("unknown propagation failed for %s", date)
 				}
-				if wantKnown && (free[i] != m.free || *d.FreeSugar != m.free) {
-					t.Fatalf("free sugar scaling failed for %s", date)
+				if wantKnown && (fat[i] != m.fat || *d.Fat != m.fat) {
+					t.Fatalf("fat scaling failed for %s", date)
 				}
-				if !wantKnown && free[i] != nil {
-					t.Fatalf("unknown free sugar shown as %v", free[i])
+				if !wantKnown && fat[i] != nil {
+					t.Fatalf("unknown fat shown as %v", fat[i])
 				}
 			}
 		})
@@ -522,8 +519,8 @@ func TestValidationBoundaryWrites(t *testing.T) {
 		{"carbohydrate", "0", false}, // Existing sugar=10 makes this invalid.
 		{"carbohydrate", "10", true}, {"carbohydrate", "100", true}, {"carbohydrate", "100.00000000000001", false},
 		{"total_sugar", "60", true}, {"total_sugar", "60.00000000000001", false},
-		{"free_sugar", "10", true}, {"free_sugar", "10.000000000000002", false}, {"free_sugar", "", true},
 		{"protein", "-0", true}, {"protein", "-0.000001", false}, {"protein", "NaN", false}, {"protein", "+Inf", false},
+		{"fat", "0", true}, {"fat", "100", true}, {"fat", "100.01", false}, {"fat", "", false},
 		{"fiber", "100", true}, {"fiber", "1e9999", false}, {"salt", "0", true}, {"salt", "-Inf", false},
 		{"name", " ", false}, {"name", strings.Repeat("a", 120), true}, {"name", strings.Repeat("a", 121), false},
 	} {
@@ -720,29 +717,5 @@ func TestValidationHTMLNamesAreEscaped(t *testing.T) {
 		if w.Code != 200 || strings.Contains(w.Body.String(), name) || !strings.Contains(w.Body.String(), "&lt;script&gt;") {
 			t.Fatalf("unsafe or missing escaped name on %s", path)
 		}
-	}
-}
-
-func TestValidationFreeSugarEditRoundTrip(t *testing.T) {
-	a := testApp(t)
-	h := a.routes()
-	v := foodForm()
-	v.Set("free_sugar", "0.01")
-	doForm(t, h, "POST", "/nutrition/foods", v, true, 303)
-	w := request(h, "GET", "/nutrition", "", "test")
-	match := regexp.MustCompile(`name="free_sugar" value="([^"]*)"`).FindStringSubmatch(w.Body.String())
-	if len(match) != 2 {
-		t.Fatal("missing saved free-sugar input")
-	}
-	// Re-submit exactly the value presented to the browser, without editing it.
-	v.Set("free_sugar", match[1])
-	doForm(t, h, "POST", "/nutrition/foods/1", v, true, 303)
-	foods, err := a.listFoods(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if foods[0].FreeSugar == nil || *foods[0].FreeSugar != 0.01 {
-		shown, _ := strconv.ParseFloat(match[1], 64)
-		t.Fatalf("save without changes rounded free sugar from 0.01 to %g", shown)
 	}
 }

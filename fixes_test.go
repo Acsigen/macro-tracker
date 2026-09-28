@@ -73,7 +73,7 @@ func TestReadHelpersPropagateFailures(t *testing.T) {
 	}
 	ctx := context.Background()
 	_, totalsErr := dailyNutrition(ctx, a.db, "2026-01-01")
-	_, _, _, _, _, _, nutritionErr := a.nutritionSeries(ctx, 7)
+	_, _, _, _, _, _, _, nutritionErr := a.nutritionSeries(ctx, 7)
 	_, _, _, _, bodyErr := a.bodySeries(ctx, 7, profile{})
 	_, _, sleepErr := a.sleepSeries(ctx, 7)
 	for name, err := range map[string]error{"totals": totalsErr, "nutrition": nutritionErr, "body": bodyErr, "sleep": sleepErr} {

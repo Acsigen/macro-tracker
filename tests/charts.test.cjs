@@ -40,14 +40,28 @@ function harness(kind, data) {
   return { handlers, element, observers, charts, media };
 }
 
-test('chart preserves zero versus unknown and repeated settle does not initialize twice', () => {
-  const h = harness('nutrition', { labels: ['a', 'b', 'c'], carbohydrate: [0, 1, 2], protein: [0, 1, 2], fiber: [0, 1, 2], salt: [0, 1, 2], freeSugar: [null, 0, 1] });
+test('nutrition chart plots sugar, preserves unknown fat, and uses the configured band', () => {
+  const h = harness('nutrition', { labels: ['a', 'b', 'c'], carbohydrate: [0, 1, 2], totalSugar: [0, 4, 8], protein: [0, 1, 2], fat: [null, 0, 1], fiber: [0, 1, 2], salt: [0, 1, 2], fatMin: 33.3, fatMax: 66.7 });
   h.handlers.get('DOMContentLoaded')();
   h.handlers.get('htmx:after:settle')();
   assert.equal(h.charts.length, 1);
-  const series = h.charts[0].option.series.find((s) => s.name === 'Free sugar');
+  const series = h.charts[0].option.series.find((s) => s.name === 'Fat');
   assert.deepEqual(Array.from(series.data), [null, 0, 1]);
   assert.equal(series.connectNulls, false);
+  assert.equal(series.markArea.data[0][0].yAxis, 33.3);
+  assert.equal(series.markArea.data[0][1].yAxis, 66.7);
+  const sugar = h.charts[0].option.series.find((s) => s.name === 'Total sugar');
+  assert.deepEqual(Array.from(sugar.data), [0, 4, 8]);
+  assert.equal(sugar.markLine.data[0].yAxis, 25);
+  assert.equal(h.charts[0].option.series.some((s) => s.name === 'Free sugar'), false);
+  const echarts = require('../assets/echarts.min.js');
+  const chart = echarts.init({ setAttribute() {} }, null, { renderer: 'svg', ssr: true, width: 500, height: 300 });
+  try {
+    chart.setOption(h.charts[0].option);
+    assert.match(chart.renderToSVGString(), /Total sugar/);
+  } finally {
+    chart.dispose();
+  }
 });
 
 test('theme changes release the observer for the disposed chart', () => {

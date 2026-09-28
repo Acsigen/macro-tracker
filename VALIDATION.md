@@ -6,7 +6,7 @@ The final run passes all 45 Go tests and fuzz seed groups, plus all eight fronte
 
 Four further fuzz runs pass after the fixes. They exercise 387,840 date inputs, 13,362 food inputs, 371,514 clock pairs, and 373,958 malformed time inputs. These runs add 1,146,674 tested inputs.
 
-Browser tests use synthetic data in `/tmp/macro-fixes-browser.db`. HTMX navigation, form submissions, and chart range changes work. A sleep entry ending on 2026-03-29 in Europe/Madrid stores seven hours for 23:00–07:00. Saving an unchanged food preserves `0.01` free sugar. Chart descriptions no longer contain `NaN`.
+Browser tests use synthetic data in `/tmp/macro-fixes-browser.db`. HTMX navigation, form submissions, and chart range changes work. A sleep entry ending on 2026-03-29 in Europe/Madrid stores seven hours for 23:00–07:00. Chart descriptions no longer contain `NaN`.
 
 The fixes preserve IDs during edits and return 404 for missing records. An edit onto an occupied date returns 409 and preserves both records. Creating a reading for an existing date still replaces that day's values.
 

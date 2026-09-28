@@ -46,15 +46,17 @@ function renderCharts() {
     if (element.dataset.kind === "nutrition") {
       const carbohydrate = line("Carbohydrate", data.carbohydrate, color("cyan"));
       carbohydrate.markArea = { silent: true, itemStyle: { color: color("cyan-faint") }, data: [[{ name: "Carbohydrate band", yAxis: data.carbMin }, { yAxis: data.carbMax }]] };
+      const totalSugar = line("Total sugar", data.totalSugar, color("sugar"));
+      totalSugar.markLine = { silent: true, symbol: "none", data: [{ name: "Total sugar limit", yAxis: 25 }] };
       const protein = line("Protein", data.protein, color("gold"));
       protein.markArea = { silent: true, itemStyle: { color: color("gold-faint") }, data: [[{ name: "Protein band", yAxis: data.proteinMin }, { yAxis: data.proteinMax }]] };
+      const fat = line("Fat", data.fat, color("orange"));
+      fat.markArea = { silent: true, itemStyle: { color: color("orange-faint") }, data: [[{ name: "Fat band", yAxis: data.fatMin }, { yAxis: data.fatMax }]] };
       const fiber = line("Fiber", data.fiber, color("paper"));
       fiber.markLine = { silent: true, symbol: "none", data: [{ name: "Fiber minimum", yAxis: 25 }] };
-      const salt = line("Salt", data.salt, color("orange"));
+      const salt = line("Salt", data.salt, color("axis"));
       salt.markLine = { silent: true, symbol: "none", data: [{ name: "Salt maximum", yAxis: 5 }] };
-      const freeSugar = line("Free sugar", data.freeSugar, color("sugar"));
-      freeSugar.markLine = { silent: true, symbol: "none", data: [{ name: "Free sugar preferred", yAxis: data.freePreferred }, { name: "Free sugar upper", yAxis: data.freeUpper }] };
-      option.series = [carbohydrate, protein, fiber, salt, freeSugar];
+      option.series = [carbohydrate, totalSugar, protein, fat, fiber, salt];
     } else if (element.dataset.kind === "body") {
       option.yAxis = [option.yAxis, { type: "value", position: "right", splitLine: { show: false }, axisLabel: { color: color("muted") } }];
       const bmi = line("BMI", data.bmi, color("gold"));

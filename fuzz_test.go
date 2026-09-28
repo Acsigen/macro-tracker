@@ -139,26 +139,26 @@ func FuzzFoodWriteValidation(f *testing.F) {
 	for _, values := range [][4]float64{{0, 0, 0, 0}, {100, 100, 100, 100}, {60, 10, 0, 12}, {1, 2, 0, 0}, {1, 1, 2, 0}, {math.NaN(), 0, 0, 0}, {0, 0, 0, math.Inf(1)}} {
 		f.Add(values[0], values[1], values[2], values[3])
 	}
-	f.Fuzz(func(t *testing.T, carb, sugar, free, protein float64) {
+	f.Fuzz(func(t *testing.T, carb, sugar, fat, protein float64) {
 		a := testApp(t)
 		v := foodForm()
-		for k, n := range map[string]float64{"carbohydrate": carb, "total_sugar": sugar, "free_sugar": free, "protein": protein} {
+		for k, n := range map[string]float64{"carbohydrate": carb, "total_sugar": sugar, "fat": fat, "protein": protein} {
 			v.Set(k, strconv.FormatFloat(n, 'g', -1, 64))
 		}
 		valid := true
-		for _, n := range []float64{carb, sugar, free, protein} {
+		for _, n := range []float64{carb, sugar, fat, protein} {
 			valid = valid && !math.IsNaN(n) && !math.IsInf(n, 0) && n >= 0 && n <= 100
 		}
-		valid = valid && sugar <= carb && free <= sugar
+		valid = valid && sugar <= carb
 		w := request(a.routes(), "POST", "/nutrition/foods", v.Encode(), "test")
 		foods, err := a.listFoods(context.Background())
 		if err != nil {
 			t.Fatal(err)
 		}
 		if (w.Code == 303) != valid || (len(foods) == 1) != valid {
-			t.Fatalf("nutrients=%v: status=%d rows=%d want accepted=%t", []float64{carb, sugar, free, protein}, w.Code, len(foods), valid)
+			t.Fatalf("nutrients=%v: status=%d rows=%d want accepted=%t", []float64{carb, sugar, fat, protein}, w.Code, len(foods), valid)
 		}
-		if valid && (foods[0].Carbohydrate != carb || foods[0].TotalSugar != sugar || foods[0].FreeSugar == nil || *foods[0].FreeSugar != free || foods[0].Protein != protein) {
+		if valid && (foods[0].Carbohydrate != carb || foods[0].TotalSugar != sugar || foods[0].Fat == nil || *foods[0].Fat != fat || foods[0].Protein != protein) {
 			t.Fatalf("persisted nutrients changed: %+v", foods[0])
 		}
 	})
