@@ -65,10 +65,10 @@ type profile struct {
 }
 
 type food struct {
-	ID                                             int64
-	Name                                           string
-	Carbohydrate, TotalSugar, Protein, Fiber, Salt float64
-	Fat                                            *float64
+	ID                                                               int64
+	Name                                                             string
+	Carbohydrate, TotalSugar, FreeSugarPercent, Protein, Fiber, Salt float64
+	Fat                                                              *float64
 }
 
 type foodEntry struct {
@@ -99,10 +99,10 @@ type dailyStatus struct {
 }
 
 type nutritionTotals struct {
-	Carbohydrate, TotalSugar, Protein, Fiber, Salt float64
-	Fat                                            *float64
-	CarbMin, CarbMax, ProteinMin, ProteinMax       float64
-	FatMin, FatMax                                 float64
+	Carbohydrate, TotalSugar, FreeSugar, Protein, Fiber, Salt float64
+	Fat                                                       *float64
+	CarbMin, CarbMax, ProteinMin, ProteinMax                  float64
+	FatMin, FatMax                                            float64
 }
 
 type pageData struct {
@@ -508,12 +508,12 @@ func (a *app) nutritionPage(w http.ResponseWriter, r *http.Request) {
 	}
 	days := parseRange(r)
 	d.Range = strconv.Itoa(days)
-	labels, carbs, sugar, protein, fat, fiber, salt, err := a.nutritionSeries(r.Context(), days)
+	labels, carbs, freeSugar, protein, fat, fiber, salt, err := a.nutritionSeries(r.Context(), days)
 	if databaseError(w, err) {
 		return
 	}
 	t := d.Profile.EnergyTarget
-	d.ChartJSON = chartJSON(map[string]any{"labels": labels, "carbohydrate": carbs, "totalSugar": sugar, "protein": protein, "fat": fat, "fiber": fiber, "salt": salt, "carbMin": t * .45 / 4, "carbMax": t * .75 / 4, "proteinMin": t * .10 / 4, "proteinMax": t * .15 / 4, "fatMin": t * .15 / 9, "fatMax": t * .30 / 9})
+	d.ChartJSON = chartJSON(map[string]any{"labels": labels, "carbohydrate": carbs, "freeSugar": freeSugar, "protein": protein, "fat": fat, "fiber": fiber, "salt": salt, "carbMin": t * .45 / 4, "carbMax": t * .75 / 4, "proteinMin": t * .10 / 4, "proteinMax": t * .15 / 4, "fatMin": t * .15 / 9, "fatMax": t * .30 / 9})
 	if d.Totals, err = dailyNutrition(r.Context(), a.db, d.Today); databaseError(w, err) {
 		return
 	}
@@ -525,7 +525,7 @@ func (a *app) nutritionPage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) listFoods(ctx context.Context) ([]food, error) {
-	rows, err := a.db.QueryContext(ctx, "SELECT id,name,carbohydrate,total_sugar,protein,fat,fiber,salt FROM foods ORDER BY name")
+	rows, err := a.db.QueryContext(ctx, "SELECT id,name,carbohydrate,total_sugar,free_sugar_percent,protein,fat,fiber,salt FROM foods ORDER BY name")
 	if err != nil {
 		return nil, err
 	}
@@ -534,7 +534,7 @@ func (a *app) listFoods(ctx context.Context) ([]food, error) {
 	for rows.Next() {
 		var f food
 		var fat sql.NullFloat64
-		if err := rows.Scan(&f.ID, &f.Name, &f.Carbohydrate, &f.TotalSugar, &f.Protein, &fat, &f.Fiber, &f.Salt); err != nil {
+		if err := rows.Scan(&f.ID, &f.Name, &f.Carbohydrate, &f.TotalSugar, &f.FreeSugarPercent, &f.Protein, &fat, &f.Fiber, &f.Salt); err != nil {
 			return nil, err
 		}
 		if fat.Valid {
@@ -656,19 +656,24 @@ func (a *app) saveFood(w http.ResponseWriter, r *http.Request) {
 	}
 	carb, e1 := formFloat(r, "carbohydrate", 0, 100)
 	sugar, e2 := formFloat(r, "total_sugar", 0, 100)
+	freeSugarPercent := 0.0
+	var e7 error
+	if r.FormValue("free_sugar_percent") != "" {
+		freeSugarPercent, e7 = formFloat(r, "free_sugar_percent", 0, 100)
+	}
 	protein, e3 := formFloat(r, "protein", 0, 100)
 	fat, e4 := formFloat(r, "fat", 0, 100)
 	fiber, e5 := formFloat(r, "fiber", 0, 100)
 	salt, e6 := formFloat(r, "salt", 0, 100)
-	if err = errors.Join(e1, e2, e3, e4, e5, e6); err != nil || sugar > carb {
+	if err = errors.Join(e1, e2, e3, e4, e5, e6, e7); err != nil || sugar > carb {
 		http.Error(w, "Nutrient values are invalid", 400)
 		return
 	}
 	var result sql.Result
 	if id == 0 {
-		result, err = a.db.ExecContext(r.Context(), "INSERT INTO foods(name,carbohydrate,total_sugar,protein,fat,fiber,salt) VALUES(?,?,?,?,?,?,?)", name, carb, sugar, protein, fat, fiber, salt)
+		result, err = a.db.ExecContext(r.Context(), "INSERT INTO foods(name,carbohydrate,total_sugar,free_sugar_percent,protein,fat,fiber,salt) VALUES(?,?,?,?,?,?,?,?)", name, carb, sugar, freeSugarPercent, protein, fat, fiber, salt)
 	} else {
-		result, err = a.db.ExecContext(r.Context(), "UPDATE foods SET name=?,carbohydrate=?,total_sugar=?,protein=?,fat=?,fiber=?,salt=? WHERE id=?", name, carb, sugar, protein, fat, fiber, salt, id)
+		result, err = a.db.ExecContext(r.Context(), "UPDATE foods SET name=?,carbohydrate=?,total_sugar=?,free_sugar_percent=?,protein=?,fat=?,fiber=?,salt=? WHERE id=?", name, carb, sugar, freeSugarPercent, protein, fat, fiber, salt, id)
 	}
 	savedRecord(w, r, result, err, "/nutrition")
 }
@@ -714,7 +719,7 @@ func (a *app) saveFoodEntry(w http.ResponseWriter, r *http.Request) {
 	var f food
 	var fat sql.NullFloat64
 	if id > 0 {
-		err = tx.QueryRowContext(ctx, "SELECT COALESCE(food_id,0),food_name,carbohydrate,total_sugar,protein,fat,fiber,salt FROM food_entries WHERE id=?", id).Scan(&f.ID, &f.Name, &f.Carbohydrate, &f.TotalSugar, &f.Protein, &fat, &f.Fiber, &f.Salt)
+		err = tx.QueryRowContext(ctx, "SELECT COALESCE(food_id,0),food_name,carbohydrate,total_sugar,free_sugar_percent,protein,fat,fiber,salt FROM food_entries WHERE id=?", id).Scan(&f.ID, &f.Name, &f.Carbohydrate, &f.TotalSugar, &f.FreeSugarPercent, &f.Protein, &fat, &f.Fiber, &f.Salt)
 		if errors.Is(err, sql.ErrNoRows) {
 			http.NotFound(w, r)
 			return
@@ -724,7 +729,7 @@ func (a *app) saveFoodEntry(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if id == 0 || foodID != f.ID {
-		err = tx.QueryRowContext(ctx, "SELECT id,name,carbohydrate,total_sugar,protein,fat,fiber,salt FROM foods WHERE id=?", foodID).Scan(&f.ID, &f.Name, &f.Carbohydrate, &f.TotalSugar, &f.Protein, &fat, &f.Fiber, &f.Salt)
+		err = tx.QueryRowContext(ctx, "SELECT id,name,carbohydrate,total_sugar,free_sugar_percent,protein,fat,fiber,salt FROM foods WHERE id=?", foodID).Scan(&f.ID, &f.Name, &f.Carbohydrate, &f.TotalSugar, &f.FreeSugarPercent, &f.Protein, &fat, &f.Fiber, &f.Salt)
 		if errors.Is(err, sql.ErrNoRows) {
 			http.Error(w, "food is invalid", 400)
 			return
@@ -739,9 +744,9 @@ func (a *app) saveFoodEntry(w http.ResponseWriter, r *http.Request) {
 	}
 	var result sql.Result
 	if id == 0 {
-		result, err = tx.ExecContext(ctx, "INSERT INTO food_entries(food_id,entry_date,consumed_g,food_name,carbohydrate,total_sugar,protein,fat,fiber,salt) VALUES(?,?,?,?,?,?,?,?,?,?)", sourceID, date, grams, f.Name, f.Carbohydrate, f.TotalSugar, f.Protein, nullable(fat), f.Fiber, f.Salt)
+		result, err = tx.ExecContext(ctx, "INSERT INTO food_entries(food_id,entry_date,consumed_g,food_name,carbohydrate,total_sugar,free_sugar_percent,protein,fat,fiber,salt) VALUES(?,?,?,?,?,?,?,?,?,?,?)", sourceID, date, grams, f.Name, f.Carbohydrate, f.TotalSugar, f.FreeSugarPercent, f.Protein, nullable(fat), f.Fiber, f.Salt)
 	} else {
-		result, err = tx.ExecContext(ctx, "UPDATE food_entries SET food_id=?,entry_date=?,consumed_g=?,food_name=?,carbohydrate=?,total_sugar=?,protein=?,fat=?,fiber=?,salt=? WHERE id=?", sourceID, date, grams, f.Name, f.Carbohydrate, f.TotalSugar, f.Protein, nullable(fat), f.Fiber, f.Salt, id)
+		result, err = tx.ExecContext(ctx, "UPDATE food_entries SET food_id=?,entry_date=?,consumed_g=?,food_name=?,carbohydrate=?,total_sugar=?,free_sugar_percent=?,protein=?,fat=?,fiber=?,salt=? WHERE id=?", sourceID, date, grams, f.Name, f.Carbohydrate, f.TotalSugar, f.FreeSugarPercent, f.Protein, nullable(fat), f.Fiber, f.Salt, id)
 	}
 	if err == nil {
 		err = tx.Commit()
@@ -757,14 +762,14 @@ func nullable(v sql.NullFloat64) any {
 }
 
 func dailyNutrition(ctx context.Context, db *sql.DB, date string) (nutritionTotals, error) {
-	var carbs, sugar, protein, fiber, salt float64
+	var carbs, sugar, freeSugar, protein, fiber, salt float64
 	var fat sql.NullFloat64
 	var unknownFat int
-	err := db.QueryRowContext(ctx, `SELECT COALESCE(SUM(carbohydrate*consumed_g/100),0),COALESCE(SUM(total_sugar*consumed_g/100),0),COALESCE(SUM(protein*consumed_g/100),0),SUM(fat*consumed_g/100),COALESCE(SUM(fiber*consumed_g/100),0),COALESCE(SUM(salt*consumed_g/100),0),COALESCE(SUM(fat IS NULL),0) FROM food_entries WHERE entry_date=?`, date).Scan(&carbs, &sugar, &protein, &fat, &fiber, &salt, &unknownFat)
+	err := db.QueryRowContext(ctx, `SELECT COALESCE(SUM(carbohydrate*consumed_g/100),0),COALESCE(SUM(total_sugar*consumed_g/100),0),COALESCE(SUM(total_sugar*free_sugar_percent*consumed_g/10000),0),COALESCE(SUM(protein*consumed_g/100),0),SUM(fat*consumed_g/100),COALESCE(SUM(fiber*consumed_g/100),0),COALESCE(SUM(salt*consumed_g/100),0),COALESCE(SUM(fat IS NULL),0) FROM food_entries WHERE entry_date=?`, date).Scan(&carbs, &sugar, &freeSugar, &protein, &fat, &fiber, &salt, &unknownFat)
 	if err != nil {
 		return nutritionTotals{}, err
 	}
-	result := nutritionTotals{Carbohydrate: carbs, TotalSugar: sugar, Protein: protein, Fiber: fiber, Salt: salt}
+	result := nutritionTotals{Carbohydrate: carbs, TotalSugar: sugar, FreeSugar: freeSugar, Protein: protein, Fiber: fiber, Salt: salt}
 	if fat.Valid && unknownFat == 0 {
 		result.Fat = &fat.Float64
 	}
@@ -774,7 +779,7 @@ func dailyNutrition(ctx context.Context, db *sql.DB, date string) (nutritionTota
 func (a *app) nutritionSeries(ctx context.Context, days int) ([]string, []float64, []float64, []float64, []any, []float64, []float64, error) {
 	labels := dateLabels(time.Now().In(a.location), days)
 	carbs := make([]float64, days)
-	sugar := make([]float64, days)
+	freeSugar := make([]float64, days)
 	protein := make([]float64, days)
 	fat := make([]any, days)
 	fiber := make([]float64, days)
@@ -785,9 +790,9 @@ func (a *app) nutritionSeries(ctx context.Context, days int) ([]string, []float6
 		fat[i] = nil
 	}
 	start := labels[0]
-	rows, err := a.db.QueryContext(ctx, `SELECT entry_date,SUM(carbohydrate*consumed_g/100),SUM(total_sugar*consumed_g/100),SUM(protein*consumed_g/100),SUM(fat*consumed_g/100),SUM(fiber*consumed_g/100),SUM(salt*consumed_g/100),SUM(fat IS NULL) FROM food_entries WHERE entry_date>=? GROUP BY entry_date`, start)
+	rows, err := a.db.QueryContext(ctx, `SELECT entry_date,SUM(carbohydrate*consumed_g/100),SUM(total_sugar*free_sugar_percent*consumed_g/10000),SUM(protein*consumed_g/100),SUM(fat*consumed_g/100),SUM(fiber*consumed_g/100),SUM(salt*consumed_g/100),SUM(fat IS NULL) FROM food_entries WHERE entry_date>=? GROUP BY entry_date`, start)
 	if err != nil {
-		return labels, carbs, sugar, protein, fat, fiber, salt, err
+		return labels, carbs, freeSugar, protein, fat, fiber, salt, err
 	}
 	defer rows.Close()
 	for rows.Next() {
@@ -796,11 +801,11 @@ func (a *app) nutritionSeries(ctx context.Context, days int) ([]string, []float6
 		var fa sql.NullFloat64
 		var unknownFat int
 		if err := rows.Scan(&date, &c, &su, &p, &fa, &fi, &s, &unknownFat); err != nil {
-			return labels, carbs, sugar, protein, fat, fiber, salt, err
+			return labels, carbs, freeSugar, protein, fat, fiber, salt, err
 		}
 		if i, ok := index[date]; ok {
 			carbs[i] = c
-			sugar[i] = su
+			freeSugar[i] = su
 			protein[i] = p
 			fiber[i] = fi
 			salt[i] = s
@@ -809,7 +814,7 @@ func (a *app) nutritionSeries(ctx context.Context, days int) ([]string, []float6
 			}
 		}
 	}
-	return labels, carbs, sugar, protein, fat, fiber, salt, rows.Err()
+	return labels, carbs, freeSugar, protein, fat, fiber, salt, rows.Err()
 }
 
 func dateLabels(now time.Time, days int) []string {

@@ -39,7 +39,7 @@ func request(h http.Handler, method, path, body, token string) *httptest.Respons
 }
 
 func foodForm() url.Values {
-	return url.Values{"csrf": {"csrf"}, "name": {"Oats"}, "carbohydrate": {"60"}, "total_sugar": {"10"}, "protein": {"12"}, "fat": {"7"}, "fiber": {"10"}, "salt": {"0"}}
+	return url.Values{"csrf": {"csrf"}, "name": {"Oats"}, "carbohydrate": {"60"}, "total_sugar": {"10"}, "free_sugar_percent": {"0"}, "protein": {"12"}, "fat": {"7"}, "fiber": {"10"}, "salt": {"0"}}
 }
 
 func entryForm() url.Values {
@@ -281,13 +281,13 @@ func TestValidationNutritionRandomizedModel(t *testing.T) {
 			rng := rand.New(rand.NewSource(seed))
 			now := time.Now().In(a.location)
 			type total struct {
-				c, s, p, fat, fiber, salt float64
-				count, unknown            int
+				c, s, fs, p, fat, fiber, salt float64
+				count, unknown                int
 			}
 			model := map[string]total{}
 			for i := range 150 {
 				date := now.AddDate(0, 0, rng.Intn(12)-9).Format("2006-01-02")
-				c, s, p, fa, fiber, salt := float64(rng.Intn(101)), float64(rng.Intn(11)), float64(rng.Intn(101)), float64(rng.Intn(101)), float64(rng.Intn(101)), float64(rng.Intn(101))
+				c, s, freePercent, p, fa, fiber, salt := float64(rng.Intn(101)), float64(rng.Intn(11)), float64(25*rng.Intn(5)), float64(rng.Intn(101)), float64(rng.Intn(101)), float64(rng.Intn(101)), float64(rng.Intn(101))
 				s = math.Min(s, c)
 				grams := float64(25 * (1 + rng.Intn(8)))
 				var fat any
@@ -298,24 +298,25 @@ func TestValidationNutritionRandomizedModel(t *testing.T) {
 					fat = fa
 					m.fat += fa * grams / 100
 				}
-				execSQL(t, a.db, `INSERT INTO food_entries(entry_date,consumed_g,food_name,carbohydrate,total_sugar,protein,fat,fiber,salt) VALUES(?,?,'Snapshot',?,?,?,?,?,?)`, date, grams, c, s, p, fat, fiber, salt)
+				execSQL(t, a.db, `INSERT INTO food_entries(entry_date,consumed_g,food_name,carbohydrate,total_sugar,free_sugar_percent,protein,fat,fiber,salt) VALUES(?,?,'Snapshot',?,?,?,?,?,?,?)`, date, grams, c, s, freePercent, p, fat, fiber, salt)
 				m.c += c * grams / 100
 				m.s += s * grams / 100
+				m.fs += s * freePercent * grams / 10000
 				m.p += p * grams / 100
 				m.fiber += fiber * grams / 100
 				m.salt += salt * grams / 100
 				m.count++
 				model[date] = m
 			}
-			labels, c, sugar, p, fat, f, salt, err := a.nutritionSeries(context.Background(), 7)
+			labels, c, freeSugar, p, fat, f, salt, err := a.nutritionSeries(context.Background(), 7)
 			if err != nil {
 				t.Fatal(err)
 			}
 			for i, date := range labels {
 				m := model[date]
 				d := mustDailyNutrition(t, a.db, date)
-				got := []float64{c[i], sugar[i], p[i], f[i], salt[i], d.Carbohydrate, d.TotalSugar, d.Protein, d.Fiber, d.Salt}
-				want := []float64{m.c, m.s, m.p, m.fiber, m.salt, m.c, m.s, m.p, m.fiber, m.salt}
+				got := []float64{c[i], freeSugar[i], p[i], f[i], salt[i], d.Carbohydrate, d.TotalSugar, d.FreeSugar, d.Protein, d.Fiber, d.Salt}
+				want := []float64{m.c, m.fs, m.p, m.fiber, m.salt, m.c, m.s, m.fs, m.p, m.fiber, m.salt}
 				if !reflect.DeepEqual(got, want) {
 					t.Fatalf("date %s: got %v want %v", date, got, want)
 				}
@@ -519,6 +520,7 @@ func TestValidationBoundaryWrites(t *testing.T) {
 		{"carbohydrate", "0", false}, // Existing sugar=10 makes this invalid.
 		{"carbohydrate", "10", true}, {"carbohydrate", "100", true}, {"carbohydrate", "100.00000000000001", false},
 		{"total_sugar", "60", true}, {"total_sugar", "60.00000000000001", false},
+		{"free_sugar_percent", "0", true}, {"free_sugar_percent", "100", true}, {"free_sugar_percent", "100.01", false},
 		{"protein", "-0", true}, {"protein", "-0.000001", false}, {"protein", "NaN", false}, {"protein", "+Inf", false},
 		{"fat", "0", true}, {"fat", "100", true}, {"fat", "100.01", false}, {"fat", "", false},
 		{"fiber", "100", true}, {"fiber", "1e9999", false}, {"salt", "0", true}, {"salt", "-Inf", false},

@@ -52,9 +52,12 @@ func TestMigration(t *testing.T) {
 		}
 	}
 	for _, table := range []string{"foods", "food_entries"} {
-		var count int
-		if err := a.db.QueryRow("SELECT COUNT(*) FROM pragma_table_info(?) WHERE name='free_sugar'", table).Scan(&count); err != nil || count != 0 {
-			t.Fatalf("%s free_sugar column count = %d, %v", table, count, err)
+		var oldCount, percentCount int
+		if err := a.db.QueryRow("SELECT COUNT(*) FROM pragma_table_info(?) WHERE name='free_sugar'", table).Scan(&oldCount); err != nil || oldCount != 0 {
+			t.Fatalf("%s free_sugar column count = %d, %v", table, oldCount, err)
+		}
+		if err := a.db.QueryRow("SELECT COUNT(*) FROM pragma_table_info(?) WHERE name='free_sugar_percent'", table).Scan(&percentCount); err != nil || percentCount != 1 {
+			t.Fatalf("%s free_sugar_percent column count = %d, %v", table, percentCount, err)
 		}
 	}
 }
@@ -63,12 +66,14 @@ func TestFatBandUsesSavedEnergyTarget(t *testing.T) {
 	a := testApp(t)
 	h := a.routes()
 	doForm(t, h, "POST", "/settings", url.Values{"csrf": {"csrf"}, "energy_target": {"1800"}}, true, http.StatusSeeOther)
-	doForm(t, h, "POST", "/nutrition/foods", foodForm(), true, http.StatusSeeOther)
+	food := foodForm()
+	food.Set("free_sugar_percent", "40")
+	doForm(t, h, "POST", "/nutrition/foods", food, true, http.StatusSeeOther)
 	entry := entryForm()
 	entry.Set("entry_date", time.Now().UTC().Format("2006-01-02"))
 	doForm(t, h, "POST", "/nutrition/entries", entry, true, http.StatusSeeOther)
 	w := request(h, "GET", "/nutrition", "", "test")
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "30.0–60.0 g band") || !strings.Contains(w.Body.String(), "25 g personal limit") || !strings.Contains(w.Body.String(), `/assets/app.js?v=`+a.version) {
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "30.0–60.0 g band") || !strings.Contains(w.Body.String(), "25 g limit") || !strings.Contains(w.Body.String(), "use 60%") || !strings.Contains(w.Body.String(), `/assets/app.js?v=`+a.version) {
 		t.Fatalf("fat band did not use saved kcal target: %d %s", w.Code, w.Body.String())
 	}
 	_, chartAttribute, ok := strings.Cut(w.Body.String(), `data-chart="`)
@@ -77,14 +82,14 @@ func TestFatBandUsesSavedEnergyTarget(t *testing.T) {
 	}
 	chartAttribute, _, _ = strings.Cut(chartAttribute, `"`)
 	var chart struct {
-		TotalSugar []float64 `json:"totalSugar"`
-		Fat        []float64 `json:"fat"`
+		FreeSugar []float64 `json:"freeSugar"`
+		Fat       []float64 `json:"fat"`
 	}
-	if err := json.Unmarshal([]byte(html.UnescapeString(chartAttribute)), &chart); err != nil || len(chart.TotalSugar) != 30 || len(chart.Fat) != 30 || chart.TotalSugar[29] != 10 || chart.Fat[29] != 7 {
+	if err := json.Unmarshal([]byte(html.UnescapeString(chartAttribute)), &chart); err != nil || len(chart.FreeSugar) != 30 || len(chart.Fat) != 30 || chart.FreeSugar[29] != 4 || chart.Fat[29] != 7 {
 		t.Fatalf("nutrition chart values: %+v, %v", chart, err)
 	}
 	js := request(h, "GET", "/assets/app.js?v="+a.version, "", "")
-	if js.Code != http.StatusOK || !strings.Contains(js.Body.String(), `line("Total sugar"`) || strings.Contains(js.Body.String(), `line("Free sugar"`) {
+	if js.Code != http.StatusOK || !strings.Contains(js.Body.String(), `line("Free sugar"`) || strings.Contains(js.Body.String(), `line("Total sugar"`) {
 		t.Fatalf("versioned chart script: %d", js.Code)
 	}
 }
@@ -112,29 +117,29 @@ func TestReferenceCalculations(t *testing.T) {
 
 func TestNutritionScalingAndUnknownFat(t *testing.T) {
 	a := testApp(t)
-	_, err := a.db.Exec(`INSERT INTO foods(name,carbohydrate,total_sugar,protein,fat,fiber,salt) VALUES('Known',50,10,20,5,8,1),('Unknown',20,5,10,NULL,2,0.5)`)
+	_, err := a.db.Exec(`INSERT INTO foods(name,carbohydrate,total_sugar,free_sugar_percent,protein,fat,fiber,salt) VALUES('Milk',50,10,0,20,5,8,1),('Soda',20,5,100,10,NULL,2,0.5)`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = a.db.Exec(`INSERT INTO food_entries(food_id,entry_date,consumed_g,food_name,carbohydrate,total_sugar,protein,fat,fiber,salt) SELECT id,'2026-09-26',200,name,carbohydrate,total_sugar,protein,fat,fiber,salt FROM foods`)
+	_, err = a.db.Exec(`INSERT INTO food_entries(food_id,entry_date,consumed_g,food_name,carbohydrate,total_sugar,free_sugar_percent,protein,fat,fiber,salt) SELECT id,'2026-09-26',200,name,carbohydrate,total_sugar,free_sugar_percent,protein,fat,fiber,salt FROM foods`)
 	if err != nil {
 		t.Fatal(err)
 	}
 	totals := mustDailyNutrition(t, a.db, "2026-09-26")
-	if totals.Carbohydrate != 140 || totals.Protein != 60 || totals.Fat != nil {
+	if totals.Carbohydrate != 140 || totals.TotalSugar != 30 || totals.FreeSugar != 10 || totals.Protein != 60 || totals.Fat != nil {
 		t.Fatalf("unexpected totals: %#v", totals)
 	}
 }
 
 func TestFoodLibrarySynchronizesLinkedEntries(t *testing.T) {
 	a := testApp(t)
-	_, err := a.db.Exec(`INSERT INTO foods(name,carbohydrate,total_sugar,protein,fat,fiber,salt) VALUES('Oats',60,1,12,7,10,0);
+	_, err := a.db.Exec(`INSERT INTO foods(name,carbohydrate,total_sugar,free_sugar_percent,protein,fat,fiber,salt) VALUES('Oats',60,1,0,12,7,10,0);
 		INSERT INTO food_entries(food_id,entry_date,consumed_g,food_name,carbohydrate,total_sugar,protein,fiber,salt) VALUES(1,'2026-09-28',100,'Old oats',50,1,12,10,0);
-		UPDATE foods SET carbohydrate=50,fat=9 WHERE id=1`)
+		UPDATE foods SET carbohydrate=50,free_sugar_percent=50,fat=9 WHERE id=1`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if totals := mustDailyNutrition(t, a.db, "2026-09-28"); totals.Fat == nil || *totals.Fat != 9 || totals.Carbohydrate != 50 {
+	if totals := mustDailyNutrition(t, a.db, "2026-09-28"); totals.Fat == nil || *totals.Fat != 9 || totals.Carbohydrate != 50 || totals.FreeSugar != 0.5 {
 		t.Fatalf("synchronized totals = %+v", totals)
 	}
 }

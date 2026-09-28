@@ -46,8 +46,8 @@ function renderCharts() {
     if (element.dataset.kind === "nutrition") {
       const carbohydrate = line("Carbohydrate", data.carbohydrate, color("cyan"));
       carbohydrate.markArea = { silent: true, itemStyle: { color: color("cyan-faint") }, data: [[{ name: "Carbohydrate band", yAxis: data.carbMin }, { yAxis: data.carbMax }]] };
-      const totalSugar = line("Total sugar", data.totalSugar, color("sugar"));
-      totalSugar.markLine = { silent: true, symbol: "none", data: [{ name: "Total sugar limit", yAxis: 25 }] };
+      const freeSugar = line("Free sugar", data.freeSugar, color("sugar"));
+      freeSugar.markLine = { silent: true, symbol: "none", data: [{ name: "Free sugar limit", yAxis: 25 }] };
       const protein = line("Protein", data.protein, color("gold"));
       protein.markArea = { silent: true, itemStyle: { color: color("gold-faint") }, data: [[{ name: "Protein band", yAxis: data.proteinMin }, { yAxis: data.proteinMax }]] };
       const fat = line("Fat", data.fat, color("orange"));
@@ -56,7 +56,7 @@ function renderCharts() {
       fiber.markLine = { silent: true, symbol: "none", data: [{ name: "Fiber minimum", yAxis: 25 }] };
       const salt = line("Salt", data.salt, color("axis"));
       salt.markLine = { silent: true, symbol: "none", data: [{ name: "Salt maximum", yAxis: 5 }] };
-      option.series = [carbohydrate, totalSugar, protein, fat, fiber, salt];
+      option.series = [carbohydrate, freeSugar, protein, fat, fiber, salt];
     } else if (element.dataset.kind === "body") {
       option.yAxis = [option.yAxis, { type: "value", position: "right", splitLine: { show: false }, axisLabel: { color: color("muted") } }];
       const bmi = line("BMI", data.bmi, color("gold"));
