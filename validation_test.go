@@ -43,7 +43,7 @@ func foodForm() url.Values {
 }
 
 func entryForm() url.Values {
-	return url.Values{"csrf": {"csrf"}, "entry_date": {"2026-01-01"}, "food_id": {"1"}, "consumed_g": {"100"}}
+	return url.Values{"csrf": {"csrf"}, "entry_date": {"2026-01-01"}, "food_name": {"Oats"}, "consumed_g": {"100"}}
 }
 
 func readingForm(kind, date string) url.Values {
@@ -308,26 +308,29 @@ func TestValidationNutritionRandomizedModel(t *testing.T) {
 				m.count++
 				model[date] = m
 			}
-			labels, c, freeSugar, p, fat, f, salt, err := a.nutritionSeries(context.Background(), 7)
+			labels, c, totalSugar, freeSugar, p, fat, f, salt, err := a.nutritionSeries(context.Background(), 7)
 			if err != nil {
 				t.Fatal(err)
 			}
 			for i, date := range labels {
 				m := model[date]
 				d := mustDailyNutrition(t, a.db, date)
-				got := []float64{c[i], freeSugar[i], p[i], f[i], salt[i], d.Carbohydrate, d.TotalSugar, d.FreeSugar, d.Protein, d.Fiber, d.Salt}
-				want := []float64{m.c, m.fs, m.p, m.fiber, m.salt, m.c, m.s, m.fs, m.p, m.fiber, m.salt}
+				got := []float64{c[i], totalSugar[i], freeSugar[i], p[i], f[i], salt[i], d.Carbohydrate, d.TotalSugar, d.FreeSugar, d.Protein, d.Fiber, d.Salt}
+				want := []float64{m.c, m.s, m.fs, m.p, m.fiber, m.salt, m.c, m.s, m.fs, m.p, m.fiber, m.salt}
 				if !reflect.DeepEqual(got, want) {
 					t.Fatalf("date %s: got %v want %v", date, got, want)
 				}
 				wantKnown := m.count > 0 && m.unknown == 0
-				if (fat[i] != nil) != wantKnown || (d.Fat != nil) != wantKnown {
+				if (d.Fat != nil) != wantKnown {
 					t.Fatalf("unknown propagation failed for %s", date)
 				}
 				if wantKnown && (fat[i] != m.fat || *d.Fat != m.fat) {
 					t.Fatalf("fat scaling failed for %s", date)
 				}
-				if !wantKnown && fat[i] != nil {
+				if m.count == 0 && fat[i] != 0.0 {
+					t.Fatalf("empty day fat = %v, want zero", fat[i])
+				}
+				if m.unknown > 0 && fat[i] != nil {
 					t.Fatalf("unknown fat shown as %v", fat[i])
 				}
 			}
@@ -631,9 +634,8 @@ func TestValidationDeletedFoodEntryRemainsEditable(t *testing.T) {
 	doForm(t, h, "POST", "/nutrition/foods", foodForm(), true, 303)
 	doForm(t, h, "POST", "/nutrition/entries", entryForm(), true, 303)
 	doForm(t, h, "POST", "/nutrition/foods/1/delete", url.Values{"csrf": {"csrf"}}, true, 303)
-	// The rendered form has no selectable saved food after deletion.
+	// The saved name still identifies the retained snapshot after deletion.
 	v := entryForm()
-	v.Set("food_id", "")
 	v.Set("consumed_g", "200")
 	w := request(h, "POST", "/nutrition/entries/1", v.Encode(), "test")
 	if w.Code != 303 {
@@ -666,7 +668,7 @@ func TestValidationNumericFormBoundaries(t *testing.T) {
 	}{
 		{"/body", "weight_kg", "1", true}, {"/body", "weight_kg", "1000", true}, {"/body", "weight_kg", "0.999999", false}, {"/body", "waist_cm", "500.001", false},
 		{"/nutrition/entries", "consumed_g", "0.01", true}, {"/nutrition/entries", "consumed_g", "100000", true}, {"/nutrition/entries", "consumed_g", "0.0099999", false}, {"/nutrition/entries", "consumed_g", "100000.00001", false},
-		{"/nutrition/entries", "food_id", "9223372036854775808", false}, {"/nutrition/entries", "food_id", "0", false},
+		{"/nutrition/entries", "food_name", "Unknown food", false}, {"/nutrition/entries", "food_name", "", false},
 		{"/settings", "height_cm", "", true}, {"/settings", "height_cm", "50", true}, {"/settings", "height_cm", "300", true}, {"/settings", "height_cm", "49.999", false},
 		{"/settings", "energy_target", "500", true}, {"/settings", "energy_target", "10000", true}, {"/settings", "energy_target", "10000.01", false},
 		{"/sleep", "bed_time", "24:00", false}, {"/sleep", "wake_time", "07:60", false}, {"/sleep", "entry_date", "2026-02-29", false},
@@ -713,7 +715,9 @@ func TestValidationHTMLNamesAreEscaped(t *testing.T) {
 	v := foodForm()
 	v.Set("name", name)
 	doForm(t, h, "POST", "/nutrition/foods", v, true, 303)
-	doForm(t, h, "POST", "/nutrition/entries", entryForm(), true, 303)
+	entry := entryForm()
+	entry.Set("food_name", name)
+	doForm(t, h, "POST", "/nutrition/entries", entry, true, 303)
 	for _, path := range []string{"/", "/nutrition"} {
 		w := request(h, "GET", path, "", "test")
 		if w.Code != 200 || strings.Contains(w.Body.String(), name) || !strings.Contains(w.Body.String(), "&lt;script&gt;") {

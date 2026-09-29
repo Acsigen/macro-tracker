@@ -72,25 +72,69 @@ func TestFatBandUsesSavedEnergyTarget(t *testing.T) {
 	entry := entryForm()
 	entry.Set("entry_date", time.Now().UTC().Format("2006-01-02"))
 	doForm(t, h, "POST", "/nutrition/entries", entry, true, http.StatusSeeOther)
-	w := request(h, "GET", "/nutrition", "", "test")
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "30.0–60.0 g band") || !strings.Contains(w.Body.String(), "25 g limit") || !strings.Contains(w.Body.String(), "use 60%") || !strings.Contains(w.Body.String(), `/assets/app.js?v=`+a.version) {
-		t.Fatalf("fat band did not use saved kcal target: %d %s", w.Code, w.Body.String())
+	nutrition := request(h, "GET", "/nutrition", "", "test")
+	if nutrition.Code != http.StatusOK || !strings.Contains(nutrition.Body.String(), "30.0–60.0 g band") || !strings.Contains(nutrition.Body.String(), "25 g limit") || !strings.Contains(nutrition.Body.String(), "use 60%") {
+		t.Fatalf("fat band did not use saved kcal target: %d %s", nutrition.Code, nutrition.Body.String())
+	}
+	w := request(h, "GET", "/dashboard", "", "test")
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `/assets/app.js?v=`+a.version) {
+		t.Fatalf("dashboard did not render: %d %s", w.Code, w.Body.String())
 	}
 	_, chartAttribute, ok := strings.Cut(w.Body.String(), `data-chart="`)
 	if !ok {
-		t.Fatal("nutrition chart data missing")
+		t.Fatal("dashboard chart data missing")
 	}
 	chartAttribute, _, _ = strings.Cut(chartAttribute, `"`)
 	var chart struct {
-		FreeSugar []float64 `json:"freeSugar"`
-		Fat       []float64 `json:"fat"`
+		TotalSugar []float64 `json:"totalSugar"`
+		FreeSugar  []float64 `json:"freeSugar"`
+		Fat        []float64 `json:"fat"`
+		Donut      struct {
+			Carbohydrate, TotalSugar, Protein, Fat, Fiber float64
+		} `json:"donut"`
 	}
-	if err := json.Unmarshal([]byte(html.UnescapeString(chartAttribute)), &chart); err != nil || len(chart.FreeSugar) != 30 || len(chart.Fat) != 30 || chart.FreeSugar[29] != 4 || chart.Fat[29] != 7 {
+	if err := json.Unmarshal([]byte(html.UnescapeString(chartAttribute)), &chart); err != nil || len(chart.FreeSugar) != 30 || len(chart.Fat) != 30 || chart.TotalSugar[29] != 10 || chart.FreeSugar[29] != 4 || chart.Fat[29] != 7 || chart.Donut.Carbohydrate != 60 || chart.Donut.TotalSugar != 10 || chart.Donut.Protein != 12 || chart.Donut.Fat != 7 || chart.Donut.Fiber != 10 {
 		t.Fatalf("nutrition chart values: %+v, %v", chart, err)
 	}
 	js := request(h, "GET", "/assets/app.js?v="+a.version, "", "")
-	if js.Code != http.StatusOK || !strings.Contains(js.Body.String(), `line("Free sugar"`) || strings.Contains(js.Body.String(), `line("Total sugar"`) {
+	if js.Code != http.StatusOK || !strings.Contains(js.Body.String(), `"free-sugar": ["Free sugar"`) || !strings.Contains(js.Body.String(), `"total-sugar": ["Total sugar"`) {
 		t.Fatalf("versioned chart script: %d", js.Code)
+	}
+}
+
+func TestNutritionSearchPaginationAndSuggestions(t *testing.T) {
+	a := testApp(t)
+	for i := 1; i <= 25; i++ {
+		name := fmt.Sprintf("Pantry food %02d", i)
+		result, err := a.db.Exec(`INSERT INTO foods(name,carbohydrate,total_sugar,free_sugar_percent,protein,fat,fiber,salt) VALUES(?,60,10,0,12,7,10,0)`, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, _ := result.LastInsertId()
+		if _, err := a.db.Exec(`INSERT INTO food_entries(food_id,entry_date,consumed_g,food_name,carbohydrate,total_sugar,free_sugar_percent,protein,fat,fiber,salt) VALUES(?,'2026-09-29',100,?,60,10,0,12,7,10,0)`, id, name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h := a.routes()
+	first := request(h, "GET", "/nutrition?food_q=Pantry&entry_q=Pantry", "", "test")
+	if first.Code != http.StatusOK || strings.Count(first.Body.String(), `action="/nutrition/foods/`) != 20 || strings.Count(first.Body.String(), `action="/nutrition/entries/`) != 20 || !strings.Contains(first.Body.String(), "food_page=2") || !strings.Contains(first.Body.String(), "entry_page=2") {
+		t.Fatalf("first page was not limited: %d", first.Code)
+	}
+	second := request(h, "GET", "/nutrition?food_q=Pantry&food_page=2&entry_q=Pantry&entry_page=2", "", "test")
+	if second.Code != http.StatusOK || strings.Count(second.Body.String(), `action="/nutrition/foods/`) != 5 || strings.Count(second.Body.String(), `action="/nutrition/entries/`) != 5 || !strings.Contains(second.Body.String(), "Page 2") {
+		t.Fatalf("second page was not rendered: %d", second.Code)
+	}
+	filtered := request(h, "GET", "/nutrition?food_q=food+25&entry_q=food+25", "", "test")
+	if filtered.Code != http.StatusOK || !strings.Contains(filtered.Body.String(), "Pantry food 25") || strings.Contains(filtered.Body.String(), "Pantry food 24") {
+		t.Fatalf("food search did not filter the lists: %d", filtered.Code)
+	}
+	suggestions := request(h, "GET", "/nutrition/foods/search?food_name=Pantry", "", "test")
+	if suggestions.Code != http.StatusOK || strings.Count(suggestions.Body.String(), "<option") != 10 || strings.Contains(suggestions.Body.String(), "Pantry food 11") {
+		t.Fatalf("suggestions were not limited: %d %s", suggestions.Code, suggestions.Body.String())
+	}
+	blankSuggestions := request(h, "GET", "/nutrition/foods/search?food_name=", "", "test")
+	if blankSuggestions.Code != http.StatusOK || strings.Contains(blankSuggestions.Body.String(), "<option") {
+		t.Fatalf("blank search returned unrelated foods: %d %s", blankSuggestions.Code, blankSuggestions.Body.String())
 	}
 }
 
@@ -157,7 +201,7 @@ func TestDailyReplacementAndFoodSync(t *testing.T) {
 	if _, err := a.db.Exec(`INSERT INTO foods(name,carbohydrate,total_sugar,protein,fiber,salt) VALUES('Oats',60,1,12,10,0)`); err != nil {
 		t.Fatal(err)
 	}
-	doForm(t, h, "POST", "/nutrition/entries", url.Values{"csrf": {"csrf"}, "entry_date": {"2026-09-26"}, "food_id": {"1"}, "consumed_g": {"100"}}, true, http.StatusSeeOther)
+	doForm(t, h, "POST", "/nutrition/entries", url.Values{"csrf": {"csrf"}, "entry_date": {"2026-09-26"}, "food_name": {"Oats"}, "consumed_g": {"100"}}, true, http.StatusSeeOther)
 	if _, err := a.db.Exec("UPDATE foods SET carbohydrate=30 WHERE id=1"); err != nil {
 		t.Fatal(err)
 	}
@@ -212,7 +256,7 @@ func TestPopulatedPagesRender(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, path := range []string{"/", "/nutrition", "/body", "/sleep", "/settings"} {
+	for _, path := range []string{"/", "/dashboard", "/nutrition", "/body", "/sleep", "/settings"} {
 		req := httptest.NewRequest("GET", path, nil)
 		req.AddCookie(&http.Cookie{Name: "session", Value: "test"})
 		res := httptest.NewRecorder()
@@ -246,8 +290,8 @@ func TestDashboardCurrentAndLatestData(t *testing.T) {
 	today := time.Now().UTC().Format("2006-01-02")
 	yesterday := time.Now().UTC().AddDate(0, 0, -1).Format("2006-01-02")
 	doForm(t, h, "POST", "/nutrition/foods", url.Values{"csrf": {"csrf"}, "name": {"Oats"}, "carbohydrate": {"60"}, "total_sugar": {"1"}, "protein": {"12"}, "fat": {"7"}, "fiber": {"10"}, "salt": {"0"}}, true, http.StatusSeeOther)
-	doForm(t, h, "POST", "/nutrition/entries", url.Values{"csrf": {"csrf"}, "entry_date": {today}, "food_id": {"1"}, "consumed_g": {"50"}}, true, http.StatusSeeOther)
-	doForm(t, h, "POST", "/nutrition/entries", url.Values{"csrf": {"csrf"}, "entry_date": {yesterday}, "food_id": {"1"}, "consumed_g": {"100"}}, true, http.StatusSeeOther)
+	doForm(t, h, "POST", "/nutrition/entries", url.Values{"csrf": {"csrf"}, "entry_date": {today}, "food_name": {"Oats"}, "consumed_g": {"50"}}, true, http.StatusSeeOther)
+	doForm(t, h, "POST", "/nutrition/entries", url.Values{"csrf": {"csrf"}, "entry_date": {yesterday}, "food_name": {"Oats"}, "consumed_g": {"100"}}, true, http.StatusSeeOther)
 	doForm(t, h, "POST", "/body", url.Values{"csrf": {"csrf"}, "entry_date": {yesterday}, "weight_kg": {"75"}, "waist_cm": {"85"}}, true, http.StatusSeeOther)
 	doForm(t, h, "POST", "/sleep", url.Values{"csrf": {"csrf"}, "entry_date": {today}, "bed_time": {"23:30"}, "wake_time": {"07:00"}}, true, http.StatusSeeOther)
 	populated := getOverview()

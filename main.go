@@ -105,6 +105,12 @@ type nutritionTotals struct {
 	FatMin, FatMax                                            float64
 }
 
+type pager struct {
+	Query                string
+	Page, Previous, Next int
+	HasPrevious, HasNext bool
+}
+
 type pageData struct {
 	Title, Path, CSRF, Today, Error, Version, Range, Summary, ChartJSON string
 	Profile                                                             profile
@@ -114,6 +120,7 @@ type pageData struct {
 	SleepEntries                                                        []sleepEntry
 	Daily                                                               dailyStatus
 	Totals                                                              nutritionTotals
+	EntryPager, FoodPager                                               pager
 	DeleteKind, DeleteName, DeleteAction, DeleteBack                    string
 }
 
@@ -272,7 +279,9 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("POST /login", a.login)
 	mux.HandleFunc("POST /logout", a.auth(a.csrf(a.logout)))
 	mux.HandleFunc("GET /", a.auth(a.dashboard))
+	mux.HandleFunc("GET /dashboard", a.auth(a.dashboardCharts))
 	mux.HandleFunc("GET /nutrition", a.auth(a.nutritionPage))
+	mux.HandleFunc("GET /nutrition/foods/search", a.auth(a.foodSuggestions))
 	mux.HandleFunc("POST /nutrition/foods", a.auth(a.csrf(a.saveFood)))
 	mux.HandleFunc("POST /nutrition/foods/{id}", a.auth(a.csrf(a.saveFood)))
 	mux.HandleFunc("GET /nutrition/foods/{id}/delete", a.auth(a.deletePage("food")))
@@ -486,6 +495,52 @@ func (a *app) dashboard(w http.ResponseWriter, r *http.Request) {
 	a.render(w, "dashboard", d)
 }
 
+func (a *app) dashboardCharts(w http.ResponseWriter, r *http.Request) {
+	d := a.baseData(r, "Dashboard")
+	var err error
+	if d.Profile, err = a.getProfile(r.Context()); databaseError(w, err) {
+		return
+	}
+	days := parseRange(r)
+	d.Range = strconv.Itoa(days)
+	labels, carbs, totalSugar, freeSugar, protein, fat, fiber, salt, err := a.nutritionSeries(r.Context(), days)
+	if databaseError(w, err) {
+		return
+	}
+	_, weight, bmis, waists, err := a.bodySeries(r.Context(), days, d.Profile)
+	if databaseError(w, err) {
+		return
+	}
+	_, sleep, err := a.sleepSeries(r.Context(), days)
+	if databaseError(w, err) {
+		return
+	}
+	if d.Totals, err = dailyNutrition(r.Context(), a.db, d.Today); databaseError(w, err) {
+		return
+	}
+	var donutFat any = d.Totals.Fat
+	if d.Totals.Fat == nil && d.Totals.Carbohydrate == 0 && d.Totals.TotalSugar == 0 && d.Totals.Protein == 0 && d.Totals.Fiber == 0 {
+		donutFat = 0.0
+	}
+	var waistTarget *float64
+	if d.Profile.HeightCM != nil {
+		v := *d.Profile.HeightCM / 2
+		waistTarget = &v
+	}
+	t := d.Profile.EnergyTarget
+	d.ChartJSON = chartJSON(map[string]any{
+		"labels": labels, "carbohydrate": carbs, "totalSugar": totalSugar, "freeSugar": freeSugar,
+		"protein": protein, "fat": fat, "fiber": fiber, "salt": salt,
+		"weight": weight, "bmi": bmis, "waist": waists, "sleep": sleep,
+		"carbMin": t * .45 / 4, "carbMax": t * .75 / 4,
+		"proteinMin": t * .10 / 4, "proteinMax": t * .15 / 4,
+		"fatMin": t * .15 / 9, "fatMax": t * .30 / 9, "waistTarget": waistTarget,
+		"donut": map[string]any{"carbohydrate": d.Totals.Carbohydrate, "totalSugar": d.Totals.TotalSugar, "protein": d.Totals.Protein, "fat": donutFat, "fiber": d.Totals.Fiber},
+	})
+	d.Summary = fmt.Sprintf("The charts show %d days of health data.", days)
+	a.render(w, "charts", d)
+}
+
 func parseRange(r *http.Request) int {
 	days, _ := strconv.Atoi(r.URL.Query().Get("days"))
 	if slices.Contains([]int{7, 30, 90, 365}, days) {
@@ -494,38 +549,64 @@ func parseRange(r *http.Request) int {
 	return 30
 }
 
+func parsePage(value string) int {
+	page, err := strconv.Atoi(value)
+	if err != nil || page < 1 || page > 1_000_000 {
+		return 1
+	}
+	return page
+}
+
+func pageState(query string, page int, hasNext bool) pager {
+	return pager{Query: query, Page: page, Previous: page - 1, Next: page + 1, HasPrevious: page > 1, HasNext: hasNext}
+}
+
 func (a *app) nutritionPage(w http.ResponseWriter, r *http.Request) {
 	d := a.baseData(r, "Nutrition")
 	var err error
 	if d.Profile, err = a.getProfile(r.Context()); databaseError(w, err) {
 		return
 	}
-	if d.Foods, err = a.listFoods(r.Context()); databaseError(w, err) {
+	entryQuery := strings.TrimSpace(r.URL.Query().Get("entry_q"))
+	entryPage := parsePage(r.URL.Query().Get("entry_page"))
+	if d.FoodEntries, err = a.queryFoodEntries(r.Context(), entryQuery, 21, (entryPage-1)*20); databaseError(w, err) {
 		return
 	}
-	if d.FoodEntries, err = a.listFoodEntries(r.Context(), 100); databaseError(w, err) {
+	d.EntryPager = pageState(entryQuery, entryPage, len(d.FoodEntries) > 20)
+	if d.EntryPager.HasNext {
+		d.FoodEntries = d.FoodEntries[:20]
+	}
+	foodQuery := strings.TrimSpace(r.URL.Query().Get("food_q"))
+	foodPage := parsePage(r.URL.Query().Get("food_page"))
+	if d.Foods, err = a.queryFoods(r.Context(), foodQuery, 21, (foodPage-1)*20); databaseError(w, err) {
 		return
 	}
-	days := parseRange(r)
-	d.Range = strconv.Itoa(days)
-	labels, carbs, freeSugar, protein, fat, fiber, salt, err := a.nutritionSeries(r.Context(), days)
-	if databaseError(w, err) {
-		return
+	d.FoodPager = pageState(foodQuery, foodPage, len(d.Foods) > 20)
+	if d.FoodPager.HasNext {
+		d.Foods = d.Foods[:20]
 	}
 	t := d.Profile.EnergyTarget
-	d.ChartJSON = chartJSON(map[string]any{"labels": labels, "carbohydrate": carbs, "freeSugar": freeSugar, "protein": protein, "fat": fat, "fiber": fiber, "salt": salt, "carbMin": t * .45 / 4, "carbMax": t * .75 / 4, "proteinMin": t * .10 / 4, "proteinMax": t * .15 / 4, "fatMin": t * .15 / 9, "fatMax": t * .30 / 9})
 	if d.Totals, err = dailyNutrition(r.Context(), a.db, d.Today); databaseError(w, err) {
 		return
 	}
 	d.Totals.CarbMin, d.Totals.CarbMax = t*.45/4, t*.75/4
 	d.Totals.ProteinMin, d.Totals.ProteinMax = t*.10/4, t*.15/4
 	d.Totals.FatMin, d.Totals.FatMax = t*.15/9, t*.30/9
-	d.Summary = fmt.Sprintf("The chart shows %d days. It compares daily totals with the selected nutrition references.", days)
 	a.render(w, "nutrition", d)
 }
 
 func (a *app) listFoods(ctx context.Context) ([]food, error) {
-	rows, err := a.db.QueryContext(ctx, "SELECT id,name,carbohydrate,total_sugar,free_sugar_percent,protein,fat,fiber,salt FROM foods ORDER BY name")
+	return a.queryFoods(ctx, "", -1, 0)
+}
+
+func searchPattern(value string) string {
+	value = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(value)
+	return "%" + value + "%"
+}
+
+func (a *app) queryFoods(ctx context.Context, query string, limit, offset int) ([]food, error) {
+	// ponytail: substring search scans one user's food library; add FTS only if measured latency requires it.
+	rows, err := a.db.QueryContext(ctx, `SELECT id,name,carbohydrate,total_sugar,free_sugar_percent,protein,fat,fiber,salt FROM foods WHERE name LIKE ? ESCAPE '\' COLLATE NOCASE ORDER BY name LIMIT ? OFFSET ?`, searchPattern(query), limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -545,8 +626,28 @@ func (a *app) listFoods(ctx context.Context) ([]food, error) {
 	return result, rows.Err()
 }
 
+func (a *app) foodSuggestions(w http.ResponseWriter, r *http.Request) {
+	query := strings.TrimSpace(r.URL.Query().Get("food_name"))
+	var foods []food
+	var err error
+	if query != "" {
+		foods, err = a.queryFoods(r.Context(), query, 10, 0)
+	}
+	if databaseError(w, err) {
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := a.tpl.ExecuteTemplate(w, "food-options", foods); err != nil {
+		slog.Error("render", "template", "food-options", "error", err)
+	}
+}
+
 func (a *app) listFoodEntries(ctx context.Context, limit int) ([]foodEntry, error) {
-	rows, err := a.db.QueryContext(ctx, "SELECT id,COALESCE(food_id,0),entry_date,consumed_g,food_name,carbohydrate,total_sugar,protein,fat,fiber,salt FROM food_entries ORDER BY entry_date DESC,id DESC LIMIT ?", limit)
+	return a.queryFoodEntries(ctx, "", limit, 0)
+}
+
+func (a *app) queryFoodEntries(ctx context.Context, query string, limit, offset int) ([]foodEntry, error) {
+	rows, err := a.db.QueryContext(ctx, `SELECT id,COALESCE(food_id,0),entry_date,consumed_g,food_name,carbohydrate,total_sugar,protein,fat,fiber,salt FROM food_entries WHERE food_name LIKE ? ESCAPE '\' COLLATE NOCASE ORDER BY entry_date DESC,id DESC LIMIT ? OFFSET ?`, searchPattern(query), limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -688,15 +789,8 @@ func (a *app) saveFoodEntry(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 400)
 		return
 	}
-	var foodID int64
-	if raw := r.FormValue("food_id"); raw != "" {
-		foodID, err = strconv.ParseInt(raw, 10, 64)
-		if err != nil || foodID <= 0 {
-			http.Error(w, "food is invalid", 400)
-			return
-		}
-	}
-	if id == 0 && foodID == 0 {
+	foodName := strings.TrimSpace(r.FormValue("food_name"))
+	if foodName == "" || !validName(foodName) {
 		http.Error(w, "food is invalid", 400)
 		return
 	}
@@ -728,8 +822,8 @@ func (a *app) saveFoodEntry(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if id == 0 || foodID != f.ID {
-		err = tx.QueryRowContext(ctx, "SELECT id,name,carbohydrate,total_sugar,free_sugar_percent,protein,fat,fiber,salt FROM foods WHERE id=?", foodID).Scan(&f.ID, &f.Name, &f.Carbohydrate, &f.TotalSugar, &f.FreeSugarPercent, &f.Protein, &fat, &f.Fiber, &f.Salt)
+	if id == 0 || !strings.EqualFold(foodName, f.Name) {
+		err = tx.QueryRowContext(ctx, "SELECT id,name,carbohydrate,total_sugar,free_sugar_percent,protein,fat,fiber,salt FROM foods WHERE name=? COLLATE NOCASE", foodName).Scan(&f.ID, &f.Name, &f.Carbohydrate, &f.TotalSugar, &f.FreeSugarPercent, &f.Protein, &fat, &f.Fiber, &f.Salt)
 		if errors.Is(err, sql.ErrNoRows) {
 			http.Error(w, "food is invalid", 400)
 			return
@@ -776,9 +870,10 @@ func dailyNutrition(ctx context.Context, db *sql.DB, date string) (nutritionTota
 	return result, nil
 }
 
-func (a *app) nutritionSeries(ctx context.Context, days int) ([]string, []float64, []float64, []float64, []any, []float64, []float64, error) {
+func (a *app) nutritionSeries(ctx context.Context, days int) ([]string, []float64, []float64, []float64, []float64, []any, []float64, []float64, error) {
 	labels := dateLabels(time.Now().In(a.location), days)
 	carbs := make([]float64, days)
+	totalSugar := make([]float64, days)
 	freeSugar := make([]float64, days)
 	protein := make([]float64, days)
 	fat := make([]any, days)
@@ -787,34 +882,37 @@ func (a *app) nutritionSeries(ctx context.Context, days int) ([]string, []float6
 	index := map[string]int{}
 	for i, v := range labels {
 		index[v] = i
-		fat[i] = nil
+		fat[i] = 0.0
 	}
 	start := labels[0]
-	rows, err := a.db.QueryContext(ctx, `SELECT entry_date,SUM(carbohydrate*consumed_g/100),SUM(total_sugar*free_sugar_percent*consumed_g/10000),SUM(protein*consumed_g/100),SUM(fat*consumed_g/100),SUM(fiber*consumed_g/100),SUM(salt*consumed_g/100),SUM(fat IS NULL) FROM food_entries WHERE entry_date>=? GROUP BY entry_date`, start)
+	rows, err := a.db.QueryContext(ctx, `SELECT entry_date,SUM(carbohydrate*consumed_g/100),SUM(total_sugar*consumed_g/100),SUM(total_sugar*free_sugar_percent*consumed_g/10000),SUM(protein*consumed_g/100),SUM(fat*consumed_g/100),SUM(fiber*consumed_g/100),SUM(salt*consumed_g/100),SUM(fat IS NULL) FROM food_entries WHERE entry_date>=? GROUP BY entry_date`, start)
 	if err != nil {
-		return labels, carbs, freeSugar, protein, fat, fiber, salt, err
+		return labels, carbs, totalSugar, freeSugar, protein, fat, fiber, salt, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var date string
-		var c, su, p, fi, s float64
+		var c, su, fs, p, fi, s float64
 		var fa sql.NullFloat64
 		var unknownFat int
-		if err := rows.Scan(&date, &c, &su, &p, &fa, &fi, &s, &unknownFat); err != nil {
-			return labels, carbs, freeSugar, protein, fat, fiber, salt, err
+		if err := rows.Scan(&date, &c, &su, &fs, &p, &fa, &fi, &s, &unknownFat); err != nil {
+			return labels, carbs, totalSugar, freeSugar, protein, fat, fiber, salt, err
 		}
 		if i, ok := index[date]; ok {
 			carbs[i] = c
-			freeSugar[i] = su
+			totalSugar[i] = su
+			freeSugar[i] = fs
 			protein[i] = p
 			fiber[i] = fi
 			salt[i] = s
 			if fa.Valid && unknownFat == 0 {
 				fat[i] = fa.Float64
+			} else {
+				fat[i] = nil
 			}
 		}
 	}
-	return labels, carbs, freeSugar, protein, fat, fiber, salt, rows.Err()
+	return labels, carbs, totalSugar, freeSugar, protein, fat, fiber, salt, rows.Err()
 }
 
 func dateLabels(now time.Time, days int) []string {
@@ -832,22 +930,9 @@ func (a *app) bodyPage(w http.ResponseWriter, r *http.Request) {
 	if d.Profile, err = a.getProfile(r.Context()); databaseError(w, err) {
 		return
 	}
-	days := parseRange(r)
-	d.Range = strconv.Itoa(days)
 	if d.BodyEntries, err = a.listBody(r.Context(), 100, d.Profile); databaseError(w, err) {
 		return
 	}
-	labels, weight, bmis, waists, err := a.bodySeries(r.Context(), days, d.Profile)
-	if databaseError(w, err) {
-		return
-	}
-	var waistTarget *float64
-	if d.Profile.HeightCM != nil {
-		v := *d.Profile.HeightCM / 2
-		waistTarget = &v
-	}
-	d.ChartJSON = chartJSON(map[string]any{"labels": labels, "weight": weight, "bmi": bmis, "waist": waists, "waistTarget": waistTarget})
-	d.Summary = fmt.Sprintf("The chart shows %d days of weight, BMI, and waist measurements.", days)
 	a.render(w, "body", d)
 }
 
@@ -961,17 +1046,9 @@ func (a *app) bodySeries(ctx context.Context, days int, p profile) ([]string, []
 func (a *app) sleepPage(w http.ResponseWriter, r *http.Request) {
 	d := a.baseData(r, "Sleep")
 	var err error
-	days := parseRange(r)
-	d.Range = strconv.Itoa(days)
 	if d.SleepEntries, err = a.listSleep(r.Context(), 100); databaseError(w, err) {
 		return
 	}
-	labels, hours, err := a.sleepSeries(r.Context(), days)
-	if databaseError(w, err) {
-		return
-	}
-	d.ChartJSON = chartJSON(map[string]any{"labels": labels, "hours": hours})
-	d.Summary = fmt.Sprintf("The chart shows %d days of sleep duration. It does not show a health band.", days)
 	a.render(w, "sleep", d)
 }
 func (a *app) listSleep(ctx context.Context, limit int) ([]sleepEntry, error) {

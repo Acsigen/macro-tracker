@@ -39,14 +39,14 @@ func TestFoodSelectionChangesSnapshotExplicitly(t *testing.T) {
 	v.Set("carbohydrate", "20")
 	doForm(t, h, "POST", "/nutrition/foods", v, true, 303)
 	e := entryForm()
-	e.Set("food_id", "2")
+	e.Set("food_name", "Other food")
 	doForm(t, h, "POST", "/nutrition/entries/1", e, true, 303)
 	entries, err := a.listFoodEntries(context.Background(), 10)
 	if err != nil || len(entries) != 1 || entries[0].FoodID != 2 || entries[0].FoodName != "Other food" || entries[0].Carbohydrate != 20 {
 		t.Fatalf("explicit food switch: %+v %v", entries, err)
 	}
 	// A failed food switch must leave the previous snapshot intact.
-	e.Set("food_id", "999")
+	e.Set("food_name", "Missing food")
 	doForm(t, h, "POST", "/nutrition/entries/1", e, true, 400)
 	after, err := a.listFoodEntries(context.Background(), 10)
 	if err != nil || !reflect.DeepEqual(entries, after) {
@@ -55,10 +55,10 @@ func TestFoodSelectionChangesSnapshotExplicitly(t *testing.T) {
 	// The remaining library food must not silently replace a deleted source.
 	doForm(t, h, "POST", "/nutrition/foods/2/delete", url.Values{"csrf": {"csrf"}}, true, 303)
 	w := request(h, "GET", "/nutrition", "", "test")
-	if !strings.Contains(w.Body.String(), `<option value="" selected>Other food (saved entry)</option>`) {
-		t.Fatal("deleted source lacks a selected snapshot option")
+	if !strings.Contains(w.Body.String(), `name="food_name" value="Other food"`) {
+		t.Fatal("deleted source lacks its saved food name")
 	}
-	e.Set("food_id", "")
+	e.Set("food_name", "Other food")
 	e.Set("consumed_g", "200")
 	doForm(t, h, "POST", "/nutrition/entries/1", e, true, 303)
 	if got := mustDailyNutrition(t, a.db, "2026-01-01"); got.Carbohydrate != 40 {
@@ -73,7 +73,7 @@ func TestReadHelpersPropagateFailures(t *testing.T) {
 	}
 	ctx := context.Background()
 	_, totalsErr := dailyNutrition(ctx, a.db, "2026-01-01")
-	_, _, _, _, _, _, _, nutritionErr := a.nutritionSeries(ctx, 7)
+	_, _, _, _, _, _, _, _, nutritionErr := a.nutritionSeries(ctx, 7)
 	_, _, _, _, bodyErr := a.bodySeries(ctx, 7, profile{})
 	_, _, sleepErr := a.sleepSeries(ctx, 7)
 	for name, err := range map[string]error{"totals": totalsErr, "nutrition": nutritionErr, "body": bodyErr, "sleep": sleepErr} {
