@@ -94,6 +94,8 @@ The daily omega ratio uses the summed omega amounts for all portions. It remains
 
 Measurements, nutrients, and ratios use two decimal places on screen. The database keeps full precision for calculations.
 
+The AI estimates omega 3 and omega 6 amounts. The app calculates their ratio and ignores any ratio returned by the AI.
+
 The ratio is a single number: omega 3 divided by omega 6. For example, 1 g divided by 2 g gives `0.50`.
 
 If omega 6 is zero and omega 3 is positive, the app shows “Undefined (omega 6 is zero)”.

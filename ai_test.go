@@ -20,10 +20,10 @@ import (
 	"time"
 )
 
-const sampleNutrition = `{"carbohydrate":20,"total_sugar":2,"free_sugar_percent":0,"protein":10,"fat":10,"fiber":5,"salt":0.2,"omega3":0.5,"omega6":2,"omega3_to_omega6":0.25,"assumptions":"Cooked edible portion with olive oil. EU carbohydrate excludes fiber."}`
+const sampleNutrition = `{"carbohydrate":20,"total_sugar":2,"free_sugar_percent":0,"protein":10,"fat":10,"fiber":5,"salt":0.2,"omega3":0.5,"omega6":2,"assumptions":"Cooked edible portion with olive oil. EU carbohydrate excludes fiber."}`
 
 func fixtureNutrition(v url.Values) (food, error) {
-	fields := map[string]any{"omega3": 0.0, "omega6": 0.0, "omega3_to_omega6": nil, "assumptions": "Test fixture."}
+	fields := map[string]any{"omega3": 0.0, "omega6": 0.0, "assumptions": "Test fixture."}
 	for _, k := range []string{"carbohydrate", "total_sugar", "free_sugar_percent", "protein", "fat", "fiber", "salt"} {
 		raw := v.Get(k)
 		if k == "free_sugar_percent" && raw == "" {
@@ -135,6 +135,10 @@ func mockGateway(t *testing.T, a *app, content string) *int {
 		if p.Model != "nutrition-model" || len(p.Messages) != 2 || p.Messages[0].Role != "system" || p.Messages[1].Role != "user" || !strings.Contains(p.Messages[0].Content, "Spain") {
 			t.Fatalf("wrong model or messages: %+v", p)
 		}
+		format, _ := json.Marshal(p.ResponseFormat)
+		if strings.Contains(p.Messages[0].Content, "omega3_to_omega6") || bytes.Contains(format, []byte("omega3_to_omega6")) {
+			t.Fatal("AI request asks the model to calculate the omega ratio")
+		}
 		// The database remains usable while the upstream request is active.
 		var count int
 		if err := a.db.QueryRow("SELECT COUNT(*) FROM foods").Scan(&count); err != nil {
@@ -210,6 +214,9 @@ func TestAIDraftsBoundToSessionExpireAndRejectTampering(t *testing.T) {
 	save := url.Values{"csrf": {"csrf"}, "draft_id": {token}, "omega3": {"100"}}
 	doForm(t, h, "POST", "/nutrition/entries", save, true, 400)
 	save.Del("omega3")
+	save.Set("omega3_to_omega6", "4")
+	doForm(t, h, "POST", "/nutrition/entries", save, true, 400)
+	save.Del("omega3_to_omega6")
 	a.sessions.m["other"] = session{csrf: "csrf", expires: time.Now().Add(time.Hour)}
 	w := request(h, "POST", "/nutrition/entries", save.Encode(), "other")
 	if w.Code != 409 {
@@ -274,7 +281,7 @@ func TestAILegacyRequiresReviewAndPreservesPastValues(t *testing.T) {
 
 func TestAINutritionValidationAndZeroRatios(t *testing.T) {
 	for _, tc := range []struct{ name, old, new string }{
-		{"missing omega", `,"omega3":0.5`, ""}, {"null omega", `"omega3":0.5`, `"omega3":null`}, {"sugar", `"total_sugar":2`, `"total_sugar":21`}, {"fat", `"fat":10`, `"fat":1`}, {"ratio", `"omega3_to_omega6":0.25`, `"omega3_to_omega6":4`}, {"missing ratio", `,"omega3_to_omega6":0.25`, ""}, {"negative", `"omega6":2`, `"omega6":-1`}, {"NaN", `"protein":10`, `"protein":NaN`}, {"range", `"protein":10`, `"protein":101`}, {"extra", `"salt":0.2`, `"bogus":3,"salt":0.2`},
+		{"missing omega", `,"omega3":0.5`, ""}, {"null omega", `"omega3":0.5`, `"omega3":null`}, {"sugar", `"total_sugar":2`, `"total_sugar":21`}, {"fat", `"fat":10`, `"fat":1`}, {"negative", `"omega6":2`, `"omega6":-1`}, {"NaN", `"protein":10`, `"protein":NaN`}, {"range", `"protein":10`, `"protein":101`}, {"extra", `"salt":0.2`, `"bogus":3,"salt":0.2`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if _, err := decodeNutrition([]byte(strings.Replace(sampleNutrition, tc.old, tc.new, 1))); err == nil {
@@ -284,12 +291,11 @@ func TestAINutritionValidationAndZeroRatios(t *testing.T) {
 	}
 	for _, tc := range []struct {
 		o3, o6 float64
-		ratio  *float64
 		want   string
-	}{{0, 0, nil, "No omega fats"}, {1, 0, nil, "Undefined (omega 6 is zero)"}, {0, 1, new(float64), "0.00"}} {
+	}{{0, 0, "No omega fats"}, {1, 0, "Undefined (omega 6 is zero)"}, {0, 1, "0.00"}, {0.5, 2, "0.25"}} {
 		var fields map[string]any
 		json.Unmarshal([]byte(sampleNutrition), &fields)
-		fields["omega3"], fields["omega6"], fields["omega3_to_omega6"] = tc.o3, tc.o6, tc.ratio
+		fields["omega3"], fields["omega6"] = tc.o3, tc.o6
 		b, _ := json.Marshal(fields)
 		f, err := decodeNutrition(b)
 		if err != nil || omegaRatio(f.Omega3, f.Omega6) != tc.want {
@@ -298,6 +304,28 @@ func TestAINutritionValidationAndZeroRatios(t *testing.T) {
 	}
 	if validDescription(strings.Repeat("🍎", 1001)) || !validDescription(strings.Repeat("é", 2000)) || validDescription("invalid\xff") {
 		t.Fatal("description limit does not match UTF16")
+	}
+}
+
+func TestAIReviewIgnoresModelRatio(t *testing.T) {
+	for _, ratio := range []string{"4", "null", `"not a ratio"`} {
+		t.Run(ratio, func(t *testing.T) {
+			a := testApp(t)
+			content := strings.Replace(sampleNutrition, `"omega6":2`, `"omega6":2,"omega3_to_omega6":`+ratio, 1)
+			mockGateway(t, a, content)
+			v := entryForm()
+			v.Set("consumed_g", "150")
+			w := request(a.routes(), "POST", "/nutrition/analyze", v.Encode(), "test")
+			token := reviewToken(t, w)
+			if !strings.Contains(w.Body.String(), "Omega 3 ÷ omega 6 ratio: 0.25") {
+				t.Fatal("review did not calculate the ratio from the omega amounts")
+			}
+			doForm(t, a.routes(), "POST", "/nutrition/entries", url.Values{"csrf": {"csrf"}, "draft_id": {token}}, true, 303)
+			totals := mustDailyNutrition(t, a.db, "2026-01-01")
+			if totals.Omega3 == nil || totals.Omega6 == nil || *totals.Omega3 != 0.75 || *totals.Omega6 != 3 || omegaRatio(totals.Omega3, totals.Omega6) != "0.25" {
+				t.Fatal("saved ratio did not use the scaled omega amounts")
+			}
+		})
 	}
 }
 
@@ -346,7 +374,6 @@ func TestAIReviewFormatsTwoDecimalsWithoutRoundingStoredNutrition(t *testing.T) 
 	values["carbohydrate"] = 20.123456
 	values["omega3"] = 0.56789
 	values["omega6"] = 2.34567
-	values["omega3_to_omega6"] = 0.56789 / 2.34567
 	content, _ := json.Marshal(values)
 	mockGateway(t, a, string(content))
 	v := entryForm()
@@ -384,7 +411,8 @@ func TestAIGatewayFallbackAndFailures(t *testing.T) {
 		if p["response_format"] != nil {
 			t.Fatal("fallback still sends unsupported parameter")
 		}
-		return gatewayResponse(200, completion(sampleNutrition)), nil
+		content := strings.Replace(sampleNutrition, `"omega6":2`, `"omega6":2,"omega3_to_omega6":4`, 1)
+		return gatewayResponse(200, completion(content)), nil
 	})
 	if _, err := a.analyzeNutrition(context.Background(), foodInput{Description: "Oats", Grams: 100}); err != nil || calls != 2 {
 		t.Fatalf("fallback %v calls=%d", err, calls)
