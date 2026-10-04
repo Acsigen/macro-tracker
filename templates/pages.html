@@ -167,20 +167,39 @@
   {{if .Error}}<p class="alert" role="alert">{{.Error}}</p>{{end}}
   <section class="panel entry-panel narrow" id="add-entry">
     <h2>{{if .Input.LibraryOnly}}Reanalyze saved food{{else if .Input.EntryID}}Review changed food{{else}}Add food entry{{end}}</h2>
+    {{if not (or .Input.LibraryOnly .Input.EntryID)}}
+    <p class="note form-choice-note">Choose how to add your food.</p>
+    <details class="entry-choice" name="food-entry-mode" {{if and .Input.Description (not .Input.SavedFood)}}open{{end}}>
+      <summary><strong>New food</strong><span>AI analysis and review</span></summary>
+    {{end}}
     <form action="{{if .Input.LibraryOnly}}/nutrition/foods/{{.Input.FoodID}}/analyze{{else}}/nutrition/analyze{{end}}" method="post" class="stack" hx-boost="false" data-analysis-form>
       <input type="hidden" name="csrf" value="{{.CSRF}}">
       {{if .Input.EntryID}}<input type="hidden" name="entry_id" value="{{.Input.EntryID}}">{{end}}
       {{if not .Input.LibraryOnly}}<label>Date<input type="date" name="entry_date" value="{{if .Input.Date}}{{.Input.Date}}{{else}}{{.Today}}{{end}}" required></label>{{end}}
-      <label>Food description<textarea name="food_name" maxlength="2000" rows="3" placeholder="For example: cooked lentils with olive oil, no added salt" required>{{.Input.Description}}</textarea></label>
-      {{if not .Input.LibraryOnly}}<label>Portion weight (g)<input type="number" name="consumed_g" value="{{if .Input.Grams}}{{f .Input.Grams}}{{end}}" min="0.01" max="100000" step="0.01" required></label>{{end}}
-      <button>Analyze food</button><p class="analysis-pending note" role="status">Analyzing food. This can take up to 60 seconds.</p>
+      <label>Food description<textarea name="food_name" maxlength="2000" rows="3" placeholder="For example: cooked lentils with olive oil, no added salt" required>{{if not .Input.SavedFood}}{{.Input.Description}}{{end}}</textarea></label>
+      {{if not .Input.LibraryOnly}}<label>Portion weight (g)<input type="number" name="consumed_g" value="{{if and .Input.Grams (not .Input.SavedFood)}}{{f .Input.Grams}}{{end}}" min="0.01" max="100000" step="0.01" required></label>{{end}}
+      <button>Analyze food</button><p class="analysis-pending note" role="status">Preparing food review. This can take up to 60 seconds.</p>
     </form>
     <p class="note">Describe the preparation, brand, and ingredients when known. Estimates use Spain and EU food conventions. Saved AI analysis is reused for the same description.</p>
-    <details><summary>Use a saved food</summary><form action="/nutrition/analyze" method="post" class="stack" hx-boost="false" data-analysis-form><input type="hidden" name="csrf" value="{{.CSRF}}"><label>Date<input type="date" name="entry_date" value="{{.Today}}" required></label><label>Saved description<input type="search" name="food_name" list="food-options" maxlength="2000" autocomplete="off" placeholder="Type to search saved foods" hx-get="/nutrition/foods/search" hx-trigger="focus, input changed delay:250ms" hx-sync="this:replace" hx-target="#food-options" hx-swap="innerHTML" hx-params="food_name" required></label><label>Portion weight (g)<input type="number" name="consumed_g" min="0.01" max="100000" step="0.01" required></label><button>Preview food</button><p class="analysis-pending note" role="status">Preparing your review.</p></form></details>
+    {{if not (or .Input.LibraryOnly .Input.EntryID)}}
+    </details>
+    <details class="entry-choice" name="food-entry-mode" {{if .Input.SavedFood}}open{{end}}>
+      <summary><strong>Library food</strong><span>Save directly</span></summary>
+      <p class="note">Saved AI nutrition is logged directly. Older manual foods need AI analysis and review before saving.</p>
+      <form action="/nutrition/entries/library" method="post" class="stack" hx-boost="false">
+        <input type="hidden" name="csrf" value="{{.CSRF}}">
+        <label>Date<input type="date" name="entry_date" value="{{if and .Input.SavedFood .Input.Date}}{{.Input.Date}}{{else}}{{.Today}}{{end}}" required></label>
+        <label>Saved description<input type="search" name="food_name" value="{{if .Input.SavedFood}}{{.Input.Description}}{{end}}" list="food-options" maxlength="2000" autocomplete="off" placeholder="Type to search saved foods" hx-get="/nutrition/foods/search" hx-trigger="focus, input changed delay:250ms" hx-sync="this:replace" hx-target="#food-options" hx-swap="innerHTML" hx-params="food_name" required></label>
+        <label>Portion weight (g)<input type="number" name="consumed_g" value="{{if and .Input.SavedFood .Input.Grams}}{{f .Input.Grams}}{{end}}" min="0.01" max="100000" step="0.01" required></label>
+        <button>Save food entry</button>
+      </form>
+    </details>
+    {{end}}
   </section>
   <datalist id="food-options"></datalist>
   {{if .Review}}<section class="panel food-review" id="food-review" aria-labelledby="review-heading">
     <h2 id="review-heading">Review nutrition estimate</h2><p class="food-description">{{.Review.Food.Name}}</p><p>{{f .Review.Input.Grams}} g portion{{if not .Review.Input.LibraryOnly}} · {{.Review.Input.Date}}{{end}}</p>
+    {{if .Review.Reused}}<p class="note" role="status">Using saved AI analysis. No new analysis was requested.</p>{{end}}
     <div class="table-scroll"><table><thead><tr><th>Nutrient</th><th class="numeric">This portion</th><th class="numeric">Per 100 g</th></tr></thead><tbody>{{range .Review.Rows}}<tr><td>{{.Label}}</td><td class="numeric">{{.Portion}}</td><td class="numeric">{{.Per100}}</td></tr>{{end}}</tbody></table></div>
     <p>Omega 3 ÷ omega 6 ratio: {{.Review.Ratio}}</p>
     <p class="note">Free sugar: {{f .Review.Food.FreeSugarPercent}}% of total sugar.</p>

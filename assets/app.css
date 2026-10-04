@@ -119,6 +119,12 @@ td:first-child{white-space:normal;min-width:160px;overflow-wrap:anywhere}
 .tracking-grid{display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:24px;align-items:start;margin-bottom:24px}
 .entry-panel{grid-column:span 4;border-top:3px solid var(--accent)}
 .entry-panel.narrow{margin-bottom:24px}
+.entry-panel .form-choice-note{margin:0 0 16px}
+.entry-choice{border:1px solid var(--line);border-radius:8px;margin-top:16px;padding:16px}
+.entry-choice>summary{font-weight:700;color:var(--accent)}
+.entry-choice>summary span{display:block;font-weight:400;color:var(--muted);margin-left:20px}
+.entry-choice[open]>summary{margin-bottom:16px}
+.entry-choice .stack{margin-top:16px}
 .chart-panel{grid-column:span 8}
 .chart{height:360px;width:100%}
 .chart-summary{color:var(--muted);margin:16px 0 0}

@@ -120,11 +120,11 @@ func TestNutritionSearchPaginationAndSuggestions(t *testing.T) {
 	}
 	h := a.routes()
 	first := request(h, "GET", "/nutrition?food_q=Pantry&entry_q=Pantry", "", "test")
-	if first.Code != http.StatusOK || strings.Count(first.Body.String(), `action="/nutrition/foods/`) != 20 || strings.Count(first.Body.String(), `action="/nutrition/entries/`) != 20 || !strings.Contains(first.Body.String(), "food_page=2") || !strings.Contains(first.Body.String(), "entry_page=2") {
+	if first.Code != http.StatusOK || strings.Count(first.Body.String(), `action="/nutrition/foods/`) != 20 || strings.Count(first.Body.String(), `id="entry-`) != 20 || !strings.Contains(first.Body.String(), "food_page=2") || !strings.Contains(first.Body.String(), "entry_page=2") {
 		t.Fatalf("first page was not limited: %d", first.Code)
 	}
 	second := request(h, "GET", "/nutrition?food_q=Pantry&food_page=2&entry_q=Pantry&entry_page=2", "", "test")
-	if second.Code != http.StatusOK || strings.Count(second.Body.String(), `action="/nutrition/foods/`) != 5 || strings.Count(second.Body.String(), `action="/nutrition/entries/`) != 5 || !strings.Contains(second.Body.String(), "Page 2") {
+	if second.Code != http.StatusOK || strings.Count(second.Body.String(), `action="/nutrition/foods/`) != 5 || strings.Count(second.Body.String(), `id="entry-`) != 5 || !strings.Contains(second.Body.String(), "Page 2") {
 		t.Fatalf("second page was not rendered: %d", second.Code)
 	}
 	filtered := request(h, "GET", "/nutrition?food_q=food+25&entry_q=food+25", "", "test")

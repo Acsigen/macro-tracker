@@ -306,6 +306,7 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("GET /nutrition/foods/{id}/delete", a.auth(a.deletePage("food")))
 	mux.HandleFunc("POST /nutrition/foods/{id}/delete", a.auth(a.csrf(a.deleteRecord("foods", "/nutrition"))))
 	mux.HandleFunc("POST /nutrition/entries", a.auth(a.csrf(a.saveFoodEntry)))
+	mux.HandleFunc("POST /nutrition/entries/library", a.auth(a.csrf(a.saveLibraryEntry)))
 	mux.HandleFunc("POST /nutrition/entries/{id}", a.auth(a.csrf(a.saveFoodEntry)))
 	mux.HandleFunc("GET /nutrition/entries/{id}/delete", a.auth(a.deletePage("food entry")))
 	mux.HandleFunc("POST /nutrition/entries/{id}/delete", a.auth(a.csrf(a.deleteRecord("food_entries", "/nutrition"))))

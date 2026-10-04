@@ -205,6 +205,144 @@ func TestAIReviewSaveReuseAndHistoricalSnapshot(t *testing.T) {
 	doForm(t, h, "POST", "/nutrition/entries/1", v, true, 303)
 }
 
+func TestAISavedFoodReuseWithoutGateway(t *testing.T) {
+	for _, name := range []string{"Oats", "Pește cu mămăligă", "Piñón tostado", "  Arroz cocido  "} {
+		t.Run(name, func(t *testing.T) {
+			a := testApp(t)
+			values := foodForm()
+			values.Set("name", name)
+			seedFood(t, a, values, 0)
+			execSQL(t, a.db, "UPDATE foods SET omega3=0.5,omega6=2")
+			a.aiTransport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+				t.Fatal("saved food requested a new AI analysis")
+				return nil, errors.New("unexpected model request")
+			})
+			v := entryForm()
+			v.Set("food_name", " \t"+strings.ToUpper(strings.TrimSpace(name))+"\n ")
+			v.Set("consumed_g", "150")
+			w := request(a.routes(), "POST", "/nutrition/analyze", v.Encode(), "test")
+			token := reviewToken(t, w)
+			if !strings.Contains(w.Body.String(), "Using saved AI analysis. No new analysis was requested.") {
+				t.Fatal("review did not identify the saved analysis")
+			}
+			doForm(t, a.routes(), "POST", "/nutrition/entries", url.Values{"csrf": {"csrf"}, "draft_id": {token}}, true, 303)
+			var count int
+			if err := a.db.QueryRow("SELECT COUNT(*) FROM foods").Scan(&count); err != nil || count != 1 {
+				t.Fatal("saved food was duplicated")
+			}
+			totals := mustDailyNutrition(t, a.db, "2026-01-01")
+			if totals.Omega3 == nil || totals.Omega6 == nil || *totals.Omega3 != 0.75 || *totals.Omega6 != 3 {
+				t.Fatal("saved analysis was not scaled to the portion weight")
+			}
+		})
+	}
+}
+
+func TestLibraryFoodSavesDirectlyWithoutGateway(t *testing.T) {
+	a := testApp(t)
+	v := foodForm()
+	v.Set("name", "Pește cu mămăligă")
+	seedFood(t, a, v, 0)
+	execSQL(t, a.db, "UPDATE foods SET omega3=0.5,omega6=2")
+	a.aiTransport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+		t.Fatal("library save requested AI analysis")
+		return nil, errors.New("unexpected model request")
+	})
+	input := entryForm()
+	input.Set("food_name", "  PEȘTE CU MĂMĂLIGĂ  ")
+	input.Set("consumed_g", "150")
+	w := doForm(t, a.routes(), "POST", "/nutrition/entries/library", input, true, 303)
+	if w.Header().Get("Location") != "/nutrition" || len(a.drafts.m) != 0 {
+		t.Fatal("library save created a review")
+	}
+	totals := mustDailyNutrition(t, a.db, input.Get("entry_date"))
+	if totals.FoodCount != 1 || *totals.Omega3 != 0.75 || *totals.Omega6 != 3 || totals.Carbohydrate != 90 {
+		t.Fatalf("incorrect saved portion: %+v", totals)
+	}
+	execSQL(t, a.db, "UPDATE foods SET carbohydrate=10,omega3=0,omega6=0,assumptions='Changed'")
+	doForm(t, a.routes(), "POST", "/nutrition/foods/1/delete", url.Values{"csrf": {"csrf"}}, true, 303)
+	totals = mustDailyNutrition(t, a.db, input.Get("entry_date"))
+	var name, model, assumptions string
+	if err := a.db.QueryRow("SELECT food_name,analysis_model,assumptions FROM food_entries").Scan(&name, &model, &assumptions); err != nil {
+		t.Fatal(err)
+	}
+	if totals.Carbohydrate != 90 || *totals.Omega3 != 0.75 || name != "Pește cu mămăligă" || model != "fixture-model" || assumptions != "Test fixture." {
+		t.Fatal("library changes altered the saved entry")
+	}
+}
+
+func TestLibraryFoodSaveRejectsInvalidSubmissions(t *testing.T) {
+	a := testApp(t)
+	seedFood(t, a, foodForm(), 0)
+	h := a.routes()
+	v := entryForm()
+	doForm(t, h, "POST", "/nutrition/entries/library", v, false, 303)
+	bad := copyValues(v)
+	bad.Set("csrf", "wrong")
+	doForm(t, h, "POST", "/nutrition/entries/library", bad, true, 403)
+	for _, change := range []struct{ field, value string }{{"food_name", "Unknown food"}, {"entry_date", "invalid"}, {"consumed_g", "0"}, {"omega3", "100"}, {"analysis_source", "ai"}, {"carbohydrate", "100"}} {
+		bad := copyValues(v)
+		bad.Set(change.field, change.value)
+		w := doForm(t, h, "POST", "/nutrition/entries/library", bad, true, 400)
+		if !strings.Contains(w.Body.String(), `name="food-entry-mode" open`) || !strings.Contains(w.Body.String(), `action="/nutrition/entries/library"`) {
+			t.Fatal("failed save did not preserve the library form")
+		}
+	}
+	bad = copyValues(v)
+	bad.Set("consumed_g", "150")
+	bad.Set("omega3", "100")
+	w := doForm(t, h, "POST", "/nutrition/entries/library", bad, true, 400)
+	if !strings.Contains(w.Body.String(), `value="Oats"`) || !strings.Contains(w.Body.String(), `value="150.00"`) {
+		t.Fatal("failed save lost the entered values")
+	}
+	if totals := mustDailyNutrition(t, a.db, v.Get("entry_date")); totals.FoodCount != 0 {
+		t.Fatal("rejected submission saved an entry")
+	}
+}
+
+func TestLibraryManualFoodRequiresReview(t *testing.T) {
+	for _, incomplete := range []string{"analysis_source='manual',omega3=NULL,omega6=NULL", "omega3=NULL"} {
+		t.Run(incomplete, func(t *testing.T) {
+			a := testApp(t)
+			seedFood(t, a, foodForm(), 0)
+			execSQL(t, a.db, "UPDATE foods SET "+incomplete)
+			calls := mockGateway(t, a, sampleNutrition)
+			v := entryForm()
+			w := doForm(t, a.routes(), "POST", "/nutrition/entries/library", v, true, 200)
+			token := reviewToken(t, w)
+			if *calls != 1 || mustDailyNutrition(t, a.db, v.Get("entry_date")).FoodCount != 0 {
+				t.Fatal("manual food bypassed analysis and review")
+			}
+			doForm(t, a.routes(), "POST", "/nutrition/entries", url.Values{"csrf": {"csrf"}, "draft_id": {token}}, true, 303)
+			doForm(t, a.routes(), "POST", "/nutrition/entries/library", v, true, 303)
+			if *calls != 1 || mustDailyNutrition(t, a.db, v.Get("entry_date")).FoodCount != 2 {
+				t.Fatal("completed analysis was not reused directly")
+			}
+		})
+	}
+}
+
+func TestAIUnicodeDraftDoesNotDuplicateSavedFood(t *testing.T) {
+	a := testApp(t)
+	calls := mockGateway(t, a, sampleNutrition)
+	v := entryForm()
+	v.Set("food_name", "Pește cu mămăligă")
+	first := reviewToken(t, request(a.routes(), "POST", "/nutrition/analyze", v.Encode(), "test"))
+	v.Set("food_name", strings.ToUpper(v.Get("food_name")))
+	second := reviewToken(t, request(a.routes(), "POST", "/nutrition/analyze", v.Encode(), "test"))
+	doForm(t, a.routes(), "POST", "/nutrition/entries", url.Values{"csrf": {"csrf"}, "draft_id": {first}}, true, 303)
+	doForm(t, a.routes(), "POST", "/nutrition/entries", url.Values{"csrf": {"csrf"}, "draft_id": {second}}, true, 409)
+	token := reviewToken(t, request(a.routes(), "POST", "/nutrition/analyze", v.Encode(), "test"))
+	if *calls != 2 {
+		t.Fatal("food saved by another draft requested a new analysis")
+	}
+	doForm(t, a.routes(), "POST", "/nutrition/entries", url.Values{"csrf": {"csrf"}, "draft_id": {token}}, true, 303)
+	var foods, entries int
+	if err := a.db.QueryRow("SELECT (SELECT COUNT(*) FROM foods),(SELECT COUNT(*) FROM food_entries)").Scan(&foods, &entries); err != nil || foods != 1 || entries != 2 {
+		t.Fatal("review duplicated the library food or lost an entry")
+	}
+}
+
 func TestAIDraftsBoundToSessionExpireAndRejectTampering(t *testing.T) {
 	a := testApp(t)
 	mockGateway(t, a, sampleNutrition)

@@ -51,11 +51,13 @@ type foodInput struct {
 	Grams             float64
 	EntryID, FoodID   int64
 	LibraryOnly       bool
+	SavedFood         bool
 }
 
 type nutrientRow struct{ Label, Portion, Per100 string }
 type foodReview struct {
 	Token, Ratio, Action string
+	Reused               bool
 	Food                 food
 	Input                foodInput
 	Rows                 []nutrientRow
@@ -72,6 +74,32 @@ func scanFood(row interface{ Scan(...any) error }) (food, error) {
 
 func foodArgs(f food) []any {
 	return []any{f.Name, f.Carbohydrate, f.TotalSugar, f.FreeSugarPercent, f.Protein, f.Fat, f.Fiber, f.Salt, f.Omega3, f.Omega6, f.AnalysisSource, f.AnalysisModel, f.AnalyzedAt, f.Assumptions}
+}
+
+type foodQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func findFoodByName(ctx context.Context, db foodQueryer, description string) (food, error) {
+	// ponytail: scan one user's library for Unicode case matching; add an indexed normalized name if this becomes slow.
+	rows, err := db.QueryContext(ctx, "SELECT id,"+foodColumns+" FROM foods ORDER BY id")
+	if err != nil {
+		return food{}, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		f, err := scanFood(rows)
+		if err != nil {
+			return food{}, err
+		}
+		if strings.EqualFold(strings.TrimSpace(f.Name), strings.TrimSpace(description)) {
+			return f, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return food{}, err
+	}
+	return food{}, sql.ErrNoRows
 }
 
 func foodFingerprint(f food) string { b, _ := json.Marshal(f); return string(b) }
@@ -537,6 +565,53 @@ func (a *app) analyzeFood(w http.ResponseWriter, r *http.Request) {
 	a.prepareFoodReview(w, r, input, false)
 }
 
+func (a *app) saveLibraryEntry(w http.ResponseWriter, r *http.Request) {
+	input := foodInput{Date: r.FormValue("entry_date"), Description: strings.TrimSpace(r.FormValue("food_name")), SavedFood: true}
+	input.Grams, _ = formFloat(r, "consumed_g", 0.01, 100000)
+	if r.ParseForm() != nil || rejectManualNutrition(r) {
+		a.nutritionError(w, r, input, 400, "Submit a saved description and portion weight, without nutrition values.")
+		return
+	}
+	if !validDescription(input.Description) || !validDate(input.Date) || input.Grams == 0 {
+		a.nutritionError(w, r, input, 400, "Select a saved food, valid date, and portion weight from 0.01 to 100000 g.")
+		return
+	}
+	ctx := r.Context()
+	tx, err := a.db.BeginTx(ctx, nil)
+	if databaseError(w, err) {
+		return
+	}
+	defer tx.Rollback()
+	f, err := findFoodByName(ctx, tx, input.Description)
+	if errors.Is(err, sql.ErrNoRows) {
+		tx.Rollback()
+		a.nutritionError(w, r, input, 400, "This food is not in the library. Select a saved food or use New food.")
+		return
+	}
+	if databaseError(w, err) {
+		return
+	}
+	if !hasSavedAnalysis(f) {
+		tx.Rollback()
+		input.FoodID = f.ID
+		a.prepareFoodReview(w, r, input, false)
+		return
+	}
+	args := append([]any{f.ID, input.Date, input.Grams}, foodArgs(f)...)
+	_, err = tx.ExecContext(ctx, "INSERT INTO food_entries(food_id,entry_date,consumed_g,"+entryFoodColumns+") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", args...)
+	if err == nil {
+		err = tx.Commit()
+	}
+	if databaseError(w, err) {
+		return
+	}
+	http.Redirect(w, r, "/nutrition", http.StatusSeeOther)
+}
+
+func hasSavedAnalysis(f food) bool {
+	return f.AnalysisSource == "ai" && f.Fat != nil && f.Omega3 != nil && f.Omega6 != nil
+}
+
 func parsePositiveID(s string) (int64, error) {
 	var id int64
 	// Parse the full string rather than accepting a numeric prefix.
@@ -595,7 +670,7 @@ func (a *app) prepareFoodReview(w http.ResponseWriter, r *http.Request, input fo
 	if input.FoodID != 0 {
 		f, err = scanFood(a.db.QueryRowContext(ctx, "SELECT id,"+foodColumns+" FROM foods WHERE id=?", input.FoodID))
 	} else {
-		f, err = scanFood(a.db.QueryRowContext(ctx, "SELECT id,"+foodColumns+" FROM foods WHERE name=? COLLATE NOCASE", input.Description))
+		f, err = findFoodByName(ctx, a.db, input.Description)
 	}
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		databaseError(w, err)
@@ -609,7 +684,8 @@ func (a *app) prepareFoodReview(w http.ResponseWriter, r *http.Request, input fo
 	if err == nil {
 		originalFood = foodFingerprint(f)
 	}
-	if force || err != nil || f.AnalysisSource != "ai" || f.Fat == nil || f.Omega3 == nil || f.Omega6 == nil {
+	reused := !force && err == nil && hasSavedAnalysis(f)
+	if !reused {
 		id := f.ID
 		f, err = a.analyzeNutrition(ctx, input)
 		if err != nil {
@@ -645,7 +721,7 @@ func (a *app) prepareFoodReview(w http.ResponseWriter, r *http.Request, input fo
 	}
 	a.drafts.m[token] = &analysisDraft{Food: f, EntryID: input.EntryID, Date: input.Date, Grams: input.Grams, Session: sessionID(r), Expires: now.Add(15 * time.Minute), LibraryOnly: input.LibraryOnly, OriginalFood: originalFood, OriginalEntry: originalEntry}
 	a.drafts.Unlock()
-	review := foodReview{Token: token, Food: f, Input: input, Ratio: omegaRatio(f.Omega3, f.Omega6), Action: "/nutrition/entries"}
+	review := foodReview{Token: token, Food: f, Input: input, Reused: reused, Ratio: omegaRatio(f.Omega3, f.Omega6), Action: "/nutrition/entries"}
 	if input.LibraryOnly {
 		review.Action = fmt.Sprintf("/nutrition/foods/%d", f.ID)
 	} else if input.EntryID != 0 {
@@ -710,13 +786,12 @@ func (a *app) saveReviewedFood(w http.ResponseWriter, r *http.Request, libraryOn
 			return
 		}
 	} else {
-		var found int
-		err = tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM foods WHERE name=? COLLATE NOCASE", f.Name).Scan(&found)
-		if databaseError(w, err) {
+		_, err = findFoodByName(ctx, tx, f.Name)
+		if err == nil {
+			http.Error(w, "This food was saved in another review. Preview it again.", 409)
 			return
 		}
-		if found != 0 {
-			http.Error(w, "This food was saved in another review. Preview it again.", 409)
+		if !errors.Is(err, sql.ErrNoRows) && databaseError(w, err) {
 			return
 		}
 	}

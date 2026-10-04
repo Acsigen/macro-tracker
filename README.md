@@ -72,9 +72,15 @@ A private gateway can work without a key. The server must have network access to
 
 ## Log and review food
 
-Open Nutrition. Enter the date, food description, and edible portion weight in grams. Include the preparation, brand, and ingredients when known.
+Open Nutrition. Select New food or Library food.
+
+For a new food, enter the date, food description, and edible portion weight in grams. Include the preparation, brand, and ingredients when known.
 
 Select Analyze food. Read the estimated portion values, values per 100 g, and preparation assumptions. Then select Save food entry.
+
+For a library food, select the saved description and enter the date and portion weight. Select Save food entry.
+
+The app saves previously analyzed library foods directly, without another review or model request. Older manual foods still need analysis and review first.
 
 The app accepts descriptions in English or Spanish, up to 2,000 characters. It uses model knowledge with Spain and EU instructions.
 
@@ -82,7 +88,11 @@ The estimates are not verified food label values. The model must provide all tra
 
 If the model cannot estimate an omega amount, revise the description and try again. The app saves nothing when analysis fails.
 
-The app reuses saved AI analysis for the same description. Select Reanalyze in the library to request new estimates.
+The app reuses saved AI analysis for the same description, even when capitalization differs or the description has surrounding spaces.
+
+This matching supports accented Romanian and Spanish letters. The review states when it uses saved analysis, without contacting the AI gateway.
+
+Select Reanalyze in the library to request new estimates.
 
 Old manual foods require AI review before reuse. Past entries retain their saved nutrition after library changes or deletion.
 
