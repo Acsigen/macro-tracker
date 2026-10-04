@@ -1,6 +1,23 @@
+document.addEventListener("submit", (event) => {
+  const form = event.target;
+  if (!form.matches("[data-analysis-form]")) return;
+  form.dataset.pending = "true";
+  for (const button of form.querySelectorAll("button")) button.disabled = true;
+});
+window.addEventListener?.("pageshow", () => {
+  document.querySelectorAll("[data-pending]").forEach((form) => {
+    delete form.dataset.pending;
+    for (const button of form.querySelectorAll("button")) button.disabled = false;
+  });
+});
+
 document.addEventListener("change", (event) => {
   if (event.target.closest("[data-auto-submit]")) event.target.form.requestSubmit();
 });
+
+function formatNumber(value) {
+  return value === null || value === undefined || !Number.isFinite(Number(value)) ? "Unknown" : Number(value).toFixed(2);
+}
 
 function baseChart(data) {
   const color = (name) => getComputedStyle(document.documentElement).getPropertyValue(`--${name}`).trim();
@@ -10,11 +27,11 @@ function baseChart(data) {
     aria: { enabled: true },
     backgroundColor: "transparent",
     textStyle: { color: color("paper"), fontFamily: "Atkinson Hyperlegible" },
-    tooltip: { trigger: "axis", backgroundColor: color("tooltip"), textStyle: { color: color("orbit") } },
+    tooltip: { trigger: "axis", backgroundColor: color("tooltip"), textStyle: { color: color("orbit") }, valueFormatter: (value) => `: ${formatNumber(value)}` },
     legend: { show: false },
     grid: { top: 16, right: 24, bottom: 16, left: 8, containLabel: true },
     xAxis: { type: "category", data: data.labels, axisLine: { lineStyle: { color: color("axis") } }, axisLabel: { color: color("muted"), hideOverlap: true, formatter: (value) => value.slice(5) } },
-    yAxis: { type: "value", axisLine: { show: false }, splitLine: { lineStyle: { color: color("line") } }, axisLabel: { color: color("muted") } }
+    yAxis: { type: "value", axisLine: { show: false }, splitLine: { lineStyle: { color: color("line") } }, axisLabel: { color: color("muted"), formatter: formatNumber } }
   };
 }
 
@@ -30,6 +47,7 @@ const metricSpecs = {
   fat: ["Fat", "fat", "orange"],
   fiber: ["Fiber", "fiber", "paper"],
   salt: ["Salt", "salt", "axis"],
+  "omega-ratio": ["Omega 3 ÷ omega 6", "omegaRatio", "cyan"],
   weight: ["Weight kg", "weight", "cyan"],
   waist: ["Waist cm", "waist", "orange"],
   bmi: ["BMI", "bmi", "gold"]
@@ -43,13 +61,18 @@ function metricChart(kind, data, color) {
   }
   const [name, key, tone] = metricSpecs[kind];
   const series = line(name, data[key], color(tone));
+  if (kind === "omega-ratio") {
+    if (!data[key].some((value) => value !== null && Number.isFinite(value))) {
+      option.title = { text: "No complete omega ratios", left: "center", top: "middle", textStyle: { color: color("paper") } };
+    }
+  }
   if (kind === "carbohydrate") series.markArea = { silent: true, itemStyle: { color: color("cyan-faint") }, data: [[{ name: "Carbohydrate band", yAxis: data.carbMin }, { yAxis: data.carbMax }]] };
   if (kind === "free-sugar") series.markLine = { silent: true, symbol: "none", data: [{ name: "Free sugar limit", yAxis: 25 }] };
   if (kind === "protein") series.markArea = { silent: true, itemStyle: { color: color("gold-faint") }, data: [[{ name: "Protein band", yAxis: data.proteinMin }, { yAxis: data.proteinMax }]] };
   if (kind === "fat") series.markArea = { silent: true, itemStyle: { color: color("orange-faint") }, data: [[{ name: "Fat band", yAxis: data.fatMin }, { yAxis: data.fatMax }]] };
   if (kind === "fiber") series.markLine = { silent: true, symbol: "none", data: [{ name: "Fiber minimum", yAxis: 25 }] };
   if (kind === "salt") series.markLine = { silent: true, symbol: "none", data: [{ name: "Salt maximum", yAxis: 5 }] };
-  if (kind === "bmi") series.markLine = { silent: true, symbol: "none", data: [18.5, 25, 30].map((value) => ({ name: `BMI ${value}`, yAxis: value })) };
+  if (kind === "bmi") series.markLine = { silent: true, symbol: "none", data: [18.5, 25, 30].map((value) => ({ name: `BMI ${formatNumber(value)}`, yAxis: value })) };
   if (kind === "waist" && data.waistTarget !== null) {
     series.markArea = { silent: true, itemStyle: { color: color("orange-faint") }, data: [[{ name: "Optimal waist range", yAxis: data.waistTarget - 4 }, { yAxis: data.waistTarget + 4 }]] };
     series.markLine = { silent: true, symbol: "none", data: [{ name: "Optimal waist", yAxis: data.waistTarget }] };
@@ -65,7 +88,7 @@ function nutrientRatio(data, color) {
     aria: { enabled: true },
     backgroundColor: "transparent",
     textStyle: { color: color("paper"), fontFamily: "Atkinson Hyperlegible" },
-    tooltip: { trigger: "item", backgroundColor: color("tooltip"), textStyle: { color: color("orbit") }, valueFormatter: (value) => `${Number(value).toFixed(1)} g` }
+    tooltip: { trigger: "item", backgroundColor: color("tooltip"), textStyle: { color: color("orbit") }, valueFormatter: (value) => `: ${formatNumber(value)} g` }
   };
   const values = data.donut;
   if (values.fat === null) return { ...common, title: { text: "Fat data is incomplete", subtext: "Add fat values to show this ratio.", left: "center", top: "middle", textStyle: { color: color("paper") }, subtextStyle: { color: color("muted") } }, series: [] };
@@ -80,7 +103,7 @@ function nutrientRatio(data, color) {
   return {
     ...common,
     legend: { type: "scroll", bottom: 0, textStyle: { color: color("paper") } },
-    series: [{ name: "Consumed grams", type: "pie", radius: ["52%", "76%"], center: ["50%", "44%"], avoidLabelOverlap: true, label: { color: color("paper"), formatter: "{b}\n{c} g" }, labelLine: { lineStyle: { color: color("axis") } }, data: slices }]
+    series: [{ name: "Consumed grams", type: "pie", radius: ["52%", "76%"], center: ["50%", "44%"], avoidLabelOverlap: true, label: { color: color("paper"), formatter: ({ name, value }) => `${name}\n${formatNumber(value)} g` }, labelLine: { lineStyle: { color: color("axis") } }, data: slices }]
   };
 }
 
@@ -108,7 +131,7 @@ function renderCharts() {
       description: element.getAttribute("aria-label") || "Health history. Missing measurements are shown as gaps."
     };
     option.series.forEach((series) => {
-      if (series.markLine) series.markLine.label = { color: color("muted"), textBorderWidth: 0, position: "insideEndTop" };
+      if (series.markLine) series.markLine.label = { color: color("muted"), textBorderWidth: 0, position: "insideEndTop", formatter: ({ value }) => formatNumber(value) };
       if (series.markArea) series.markArea.label = { color: color("muted"), textBorderWidth: 0, position: "insideTop" };
     });
     const chart = echarts.init(element);

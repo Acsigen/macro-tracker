@@ -19,7 +19,8 @@ import (
 
 func testApp(t *testing.T) *app {
 	t.Helper()
-	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "test.db"))
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,13 +33,15 @@ func testApp(t *testing.T) *app {
 	}
 	t.Cleanup(func() { db.Close() })
 	tpl, err := template.New("pages").Funcs(template.FuncMap{
-		"f":   func(v float64) string { return fmt.Sprintf("%.1f", v) },
-		"ptr": optionalNumber,
+		"f":     func(v float64) string { return fmt.Sprintf("%.2f", v) },
+		"ptr":   optionalNumber,
+		"omega": omegaAmount,
+		"ratio": omegaRatio,
 	}).ParseFS(files, "templates/*.html")
 	if err != nil {
 		t.Fatal(err)
 	}
-	a := &app{db: db, tpl: tpl, cfg: config{email: "me@example.com", password: "secret"}, version: "0.1.0", location: time.UTC}
+	a := &app{db: db, tpl: tpl, cfg: config{email: "me@example.com", password: "secret", dbPath: dbPath}, version: "0.1.0", location: time.UTC}
 	a.sessions.m = map[string]session{"test": {csrf: "csrf", expires: time.Now().Add(time.Hour)}}
 	return a
 }
@@ -68,12 +71,12 @@ func TestFatBandUsesSavedEnergyTarget(t *testing.T) {
 	doForm(t, h, "POST", "/settings", url.Values{"csrf": {"csrf"}, "energy_target": {"1800"}}, true, http.StatusSeeOther)
 	food := foodForm()
 	food.Set("free_sugar_percent", "40")
-	doForm(t, h, "POST", "/nutrition/foods", food, true, http.StatusSeeOther)
+	seedFood(t, a, food, 0)
 	entry := entryForm()
 	entry.Set("entry_date", time.Now().UTC().Format("2006-01-02"))
-	doForm(t, h, "POST", "/nutrition/entries", entry, true, http.StatusSeeOther)
+	logReviewedFood(t, a, "/nutrition/entries", entry)
 	nutrition := request(h, "GET", "/nutrition", "", "test")
-	if nutrition.Code != http.StatusOK || !strings.Contains(nutrition.Body.String(), "30.0–60.0 g band") || !strings.Contains(nutrition.Body.String(), "25 g limit") || !strings.Contains(nutrition.Body.String(), "use 60%") {
+	if nutrition.Code != http.StatusOK || !strings.Contains(nutrition.Body.String(), "30.00–60.00 g band") || !strings.Contains(nutrition.Body.String(), "25 g limit") {
 		t.Fatalf("fat band did not use saved kcal target: %d %s", nutrition.Code, nutrition.Body.String())
 	}
 	w := request(h, "GET", "/dashboard", "", "test")
@@ -175,7 +178,7 @@ func TestNutritionScalingAndUnknownFat(t *testing.T) {
 	}
 }
 
-func TestFoodLibrarySynchronizesLinkedEntries(t *testing.T) {
+func TestFoodLibraryPreservesLinkedEntries(t *testing.T) {
 	a := testApp(t)
 	_, err := a.db.Exec(`INSERT INTO foods(name,carbohydrate,total_sugar,free_sugar_percent,protein,fat,fiber,salt) VALUES('Oats',60,1,0,12,7,10,0);
 		INSERT INTO food_entries(food_id,entry_date,consumed_g,food_name,carbohydrate,total_sugar,protein,fiber,salt) VALUES(1,'2026-09-28',100,'Old oats',50,1,12,10,0);
@@ -183,12 +186,12 @@ func TestFoodLibrarySynchronizesLinkedEntries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if totals := mustDailyNutrition(t, a.db, "2026-09-28"); totals.Fat == nil || *totals.Fat != 9 || totals.Carbohydrate != 50 || totals.FreeSugar != 0.5 {
-		t.Fatalf("synchronized totals = %+v", totals)
+	if totals := mustDailyNutrition(t, a.db, "2026-09-28"); totals.Fat != nil || totals.Carbohydrate != 50 || totals.FreeSugar != 0 {
+		t.Fatalf("preserved totals = %+v", totals)
 	}
 }
 
-func TestDailyReplacementAndFoodSync(t *testing.T) {
+func TestDailyReplacementAndFoodSnapshot(t *testing.T) {
 	a := testApp(t)
 	h := a.routes()
 	doForm(t, h, "POST", "/body", url.Values{"csrf": {"csrf"}, "entry_date": {"2026-09-26"}, "weight_kg": {"80"}, "waist_cm": {"90"}}, true, http.StatusSeeOther)
@@ -201,13 +204,14 @@ func TestDailyReplacementAndFoodSync(t *testing.T) {
 	if _, err := a.db.Exec(`INSERT INTO foods(name,carbohydrate,total_sugar,protein,fiber,salt) VALUES('Oats',60,1,12,10,0)`); err != nil {
 		t.Fatal(err)
 	}
-	doForm(t, h, "POST", "/nutrition/entries", url.Values{"csrf": {"csrf"}, "entry_date": {"2026-09-26"}, "food_name": {"Oats"}, "consumed_g": {"100"}}, true, http.StatusSeeOther)
+	execSQL(t, a.db, "UPDATE foods SET fat=7,omega3=0,omega6=0,analysis_source='ai' WHERE id=1")
+	logReviewedFood(t, a, "/nutrition/entries", url.Values{"csrf": {"csrf"}, "entry_date": {"2026-09-26"}, "food_name": {"Oats"}, "consumed_g": {"100"}})
 	if _, err := a.db.Exec("UPDATE foods SET carbohydrate=30 WHERE id=1"); err != nil {
 		t.Fatal(err)
 	}
 	var snapshot float64
-	if err := a.db.QueryRow("SELECT carbohydrate FROM food_entries").Scan(&snapshot); err != nil || snapshot != 30 {
-		t.Fatalf("synchronized carbohydrate = %v, %v", snapshot, err)
+	if err := a.db.QueryRow("SELECT carbohydrate FROM food_entries").Scan(&snapshot); err != nil || snapshot != 60 {
+		t.Fatalf("preserved carbohydrate = %v, %v", snapshot, err)
 	}
 }
 
@@ -225,8 +229,8 @@ func TestHTTPAuthenticationCSRFValidationEditAndDelete(t *testing.T) {
 	doForm(t, h, "POST", "/login", url.Values{"email": {"me@example.com"}, "password": {"secret"}}, false, http.StatusSeeOther)
 	doForm(t, h, "POST", "/nutrition/foods", url.Values{"name": {"Bad"}}, true, http.StatusForbidden)
 	doForm(t, h, "POST", "/nutrition/foods", url.Values{"csrf": {"csrf"}, "name": {"Bad"}, "carbohydrate": {"10"}, "total_sugar": {"11"}, "protein": {"1"}, "fat": {"1"}, "fiber": {"1"}, "salt": {"1"}}, true, http.StatusBadRequest)
-	doForm(t, h, "POST", "/nutrition/foods", url.Values{"csrf": {"csrf"}, "name": {"Oats"}, "carbohydrate": {"60"}, "total_sugar": {"1"}, "protein": {"12"}, "fat": {"7"}, "fiber": {"10"}, "salt": {"0"}}, true, http.StatusSeeOther)
-	doForm(t, h, "POST", "/nutrition/foods/1", url.Values{"csrf": {"csrf"}, "name": {"Rolled oats"}, "carbohydrate": {"60"}, "total_sugar": {"1"}, "protein": {"12"}, "fat": {"7"}, "fiber": {"10"}, "salt": {"0"}}, true, http.StatusSeeOther)
+	seedFood(t, a, url.Values{"csrf": {"csrf"}, "name": {"Oats"}, "carbohydrate": {"60"}, "total_sugar": {"1"}, "protein": {"12"}, "fat": {"7"}, "fiber": {"10"}, "salt": {"0"}}, 0)
+	seedFood(t, a, url.Values{"csrf": {"csrf"}, "name": {"Rolled oats"}, "carbohydrate": {"60"}, "total_sugar": {"1"}, "protein": {"12"}, "fat": {"7"}, "fiber": {"10"}, "salt": {"0"}}, 1)
 
 	get := httptest.NewRequest("GET", "/nutrition/foods/1/delete", nil)
 	get.AddCookie(&http.Cookie{Name: "session", Value: "test"})
@@ -289,13 +293,13 @@ func TestDashboardCurrentAndLatestData(t *testing.T) {
 	}
 	today := time.Now().UTC().Format("2006-01-02")
 	yesterday := time.Now().UTC().AddDate(0, 0, -1).Format("2006-01-02")
-	doForm(t, h, "POST", "/nutrition/foods", url.Values{"csrf": {"csrf"}, "name": {"Oats"}, "carbohydrate": {"60"}, "total_sugar": {"1"}, "protein": {"12"}, "fat": {"7"}, "fiber": {"10"}, "salt": {"0"}}, true, http.StatusSeeOther)
-	doForm(t, h, "POST", "/nutrition/entries", url.Values{"csrf": {"csrf"}, "entry_date": {today}, "food_name": {"Oats"}, "consumed_g": {"50"}}, true, http.StatusSeeOther)
-	doForm(t, h, "POST", "/nutrition/entries", url.Values{"csrf": {"csrf"}, "entry_date": {yesterday}, "food_name": {"Oats"}, "consumed_g": {"100"}}, true, http.StatusSeeOther)
+	seedFood(t, a, url.Values{"csrf": {"csrf"}, "name": {"Oats"}, "carbohydrate": {"60"}, "total_sugar": {"1"}, "protein": {"12"}, "fat": {"7"}, "fiber": {"10"}, "salt": {"0"}}, 0)
+	logReviewedFood(t, a, "/nutrition/entries", url.Values{"csrf": {"csrf"}, "entry_date": {today}, "food_name": {"Oats"}, "consumed_g": {"50"}})
+	logReviewedFood(t, a, "/nutrition/entries", url.Values{"csrf": {"csrf"}, "entry_date": {yesterday}, "food_name": {"Oats"}, "consumed_g": {"100"}})
 	doForm(t, h, "POST", "/body", url.Values{"csrf": {"csrf"}, "entry_date": {yesterday}, "weight_kg": {"75"}, "waist_cm": {"85"}}, true, http.StatusSeeOther)
 	doForm(t, h, "POST", "/sleep", url.Values{"csrf": {"csrf"}, "entry_date": {today}, "bed_time": {"23:30"}, "wake_time": {"07:00"}}, true, http.StatusSeeOther)
 	populated := getOverview()
-	for _, want := range []string{"30.0 <span>g carbs</span>", "6.0 g protein", "3.5 g fat", "75.0 <span>kg</span>", "7.5 <span>hours</span>", "Latest: <time>" + yesterday, "Oats", "/nutrition#entry-1"} {
+	for _, want := range []string{"30.00 <span>g carbs</span>", "6.00 g protein", "3.50 g fat", "75.00 <span>kg</span>", "7.50 <span>hours</span>", "Latest: <time>" + yesterday, "Oats", "/nutrition#entry-1"} {
 		if !strings.Contains(populated, want) {
 			t.Errorf("populated overview missing %q", want)
 		}

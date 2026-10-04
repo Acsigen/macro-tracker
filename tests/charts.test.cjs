@@ -46,6 +46,7 @@ test('each metric chart has one series and keeps its reference marker', () => {
     const h = harness(kind, data);
     h.handlers.get('DOMContentLoaded')();
     assert.equal(h.charts[0].option.series.length, 1, kind);
+    assert.equal(h.charts[0].option.series[0].name + h.charts[0].option.tooltip.valueFormatter(1.234567), `${h.charts[0].option.series[0].name}: 1.23`, kind);
   }
   const fat = harness('fat', data);
   fat.handlers.get('DOMContentLoaded')();
@@ -71,6 +72,35 @@ test('nutrient donut has five slices and honest empty states', () => {
   unknown.handlers.get('DOMContentLoaded')();
   assert.equal(unknown.charts[0].option.series.length, 0);
   assert.equal(unknown.charts[0].option.title.text, 'Fat data is incomplete');
+});
+
+test('omega ratio history preserves gaps and zero ratios', () => {
+  const ratios = [4 / 21, null, 0, null];
+  const h = harness('omega-ratio', { labels: ['a', 'b', 'c', 'd'], omegaRatio: ratios });
+  h.handlers.get('DOMContentLoaded')();
+  const option = h.charts[0].option;
+  assert.deepEqual(Array.from(option.series[0].data), ratios);
+  assert.equal(option.series[0].connectNulls, false);
+  assert.equal(option.yAxis.axisLabel.formatter(4 / 21), '0.19');
+  assert.equal(option.tooltip.valueFormatter(0), ': 0.00');
+  assert.equal(option.title, undefined);
+  const empty = harness('omega-ratio', { labels: ['a'], omegaRatio: [null] });
+  empty.handlers.get('DOMContentLoaded')();
+  assert.equal(empty.charts[0].option.title.text, 'No complete omega ratios');
+});
+
+test('chart labels and tooltips use two decimals without rounding their data', () => {
+  const h = harness('protein', { labels: ['a'], protein: [1.234567], proteinMin: 10, proteinMax: 20 });
+  h.handlers.get('DOMContentLoaded')();
+  const option = h.charts[0].option;
+  assert.equal(option.series[0].data[0], 1.234567);
+  assert.equal(option.tooltip.valueFormatter(1.234567), ': 1.23');
+  assert.equal(option.tooltip.valueFormatter(null), ': Unknown');
+  assert.equal(option.yAxis.axisLabel.formatter(1), '1.00');
+  const donut = harness('nutrient-ratio', { donut: { carbohydrate: 60.123456, totalSugar: 10, protein: 12, fat: 7, fiber: 10 } });
+  donut.handlers.get('DOMContentLoaded')();
+  assert.equal(donut.charts[0].option.tooltip.valueFormatter(60.123456), ': 60.12 g');
+  assert.equal(donut.charts[0].option.series[0].label.formatter({ name: 'Carbohydrate', value: 60.123456 }), 'Carbohydrate\n60.12 g');
 });
 
 test('theme changes release the observer for the disposed chart', () => {

@@ -134,7 +134,7 @@ func TestValidationMissingUpdateDoesNotSucceed(t *testing.T) {
 		t.Run(path, func(t *testing.T) {
 			a := testApp(t)
 			h := a.routes()
-			doForm(t, h, "POST", "/nutrition/foods", foodForm(), true, 303)
+			seedFood(t, a, foodForm(), 0)
 			v := foodForm()
 			if strings.Contains(path, "entries") {
 				v = entryForm()
@@ -160,20 +160,19 @@ func TestValidationMissingUpdateDoesNotSucceed(t *testing.T) {
 	}
 }
 
-func TestValidationAmountEditUsesLibraryValues(t *testing.T) {
+func TestValidationAmountEditUsesSavedSnapshot(t *testing.T) {
 	a := testApp(t)
-	h := a.routes()
-	doForm(t, h, "POST", "/nutrition/foods", foodForm(), true, 303)
-	doForm(t, h, "POST", "/nutrition/entries", entryForm(), true, 303)
+	seedFood(t, a, foodForm(), 0)
+	logReviewedFood(t, a, "/nutrition/entries", entryForm())
 	v := foodForm()
 	v.Set("carbohydrate", "30")
-	doForm(t, h, "POST", "/nutrition/foods/1", v, true, 303)
+	seedFood(t, a, v, 1)
 	e := entryForm()
 	e.Set("consumed_g", "200")
-	doForm(t, h, "POST", "/nutrition/entries/1", e, true, 303)
+	logReviewedFood(t, a, "/nutrition/entries/1", e)
 	got := mustDailyNutrition(t, a.db, "2026-01-01")
-	if got.Carbohydrate != 60 || got.Fat == nil || *got.Fat != 14 {
-		t.Fatalf("amount edit did not use library nutrients: %+v", got)
+	if got.Carbohydrate != 120 || got.Fat == nil || *got.Fat != 14 {
+		t.Fatalf("amount edit did not use saved nutrients: %+v", got)
 	}
 }
 
@@ -341,8 +340,8 @@ func TestValidationNutritionRandomizedModel(t *testing.T) {
 func TestValidationFoodDeletionPreservesHistory(t *testing.T) {
 	a := testApp(t)
 	h := a.routes()
-	doForm(t, h, "POST", "/nutrition/foods", foodForm(), true, 303)
-	doForm(t, h, "POST", "/nutrition/entries", entryForm(), true, 303)
+	seedFood(t, a, foodForm(), 0)
+	logReviewedFood(t, a, "/nutrition/entries", entryForm())
 	before := mustDailyNutrition(t, a.db, "2026-01-01")
 	doForm(t, h, "POST", "/nutrition/foods/1/delete", url.Values{"csrf": {"csrf"}}, true, 303)
 	after := mustDailyNutrition(t, a.db, "2026-01-01")
@@ -356,7 +355,7 @@ func TestValidationFoodDeletionPreservesHistory(t *testing.T) {
 	// Reusing the old food ID must not reattach its historical entries.
 	v := foodForm()
 	v.Set("name", "New food")
-	doForm(t, h, "POST", "/nutrition/foods", v, true, 303)
+	seedFood(t, a, v, 0)
 	entries, err = a.listFoodEntries(context.Background(), 10)
 	if err != nil || entries[0].FoodID != 0 {
 		t.Fatalf("history reattached: %+v %v", entries, err)
@@ -527,19 +526,15 @@ func TestValidationBoundaryWrites(t *testing.T) {
 		{"protein", "-0", true}, {"protein", "-0.000001", false}, {"protein", "NaN", false}, {"protein", "+Inf", false},
 		{"fat", "0", true}, {"fat", "100", true}, {"fat", "100.01", false}, {"fat", "", false},
 		{"fiber", "100", true}, {"fiber", "1e9999", false}, {"salt", "0", true}, {"salt", "-Inf", false},
-		{"name", " ", false}, {"name", strings.Repeat("a", 120), true}, {"name", strings.Repeat("a", 121), false},
+		{"name", " ", false}, {"name", strings.Repeat("a", 2000), true}, {"name", strings.Repeat("a", 2001), false},
 	} {
 		t.Run(tc.field+"="+tc.value, func(t *testing.T) {
-			a := testApp(t)
 			v := foodForm()
 			v.Set(tc.field, tc.value)
-			w := request(a.routes(), "POST", "/nutrition/foods", v.Encode(), "test")
-			var n int
-			if err := a.db.QueryRow("SELECT COUNT(*) FROM foods").Scan(&n); err != nil {
-				t.Fatal(err)
-			}
-			if (w.Code == 303) != tc.ok || (n == 1) != tc.ok {
-				t.Fatalf("status=%d rows=%d want accepted=%t", w.Code, n, tc.ok)
+			_, err := fixtureNutrition(v)
+			accepted := err == nil && validDescription(strings.TrimSpace(v.Get("name")))
+			if accepted != tc.ok {
+				t.Fatalf("accepted=%t error=%v want %t", accepted, err, tc.ok)
 			}
 		})
 	}
@@ -614,7 +609,7 @@ func TestValidationBodyAndSleepChartWindows(t *testing.T) {
 
 func TestValidationUnicodeNameMatchesFormLimit(t *testing.T) {
 	// 61 BMP characters fit the browser's maxlength=120; they occupy 122 UTF-8 bytes.
-	for _, path := range []string{"/nutrition/foods", "/settings"} {
+	for _, path := range []string{"/settings"} {
 		t.Run(path, func(t *testing.T) {
 			a := testApp(t)
 			v := foodForm()
@@ -631,8 +626,8 @@ func TestValidationUnicodeNameMatchesFormLimit(t *testing.T) {
 func TestValidationDeletedFoodEntryRemainsEditable(t *testing.T) {
 	a := testApp(t)
 	h := a.routes()
-	doForm(t, h, "POST", "/nutrition/foods", foodForm(), true, 303)
-	doForm(t, h, "POST", "/nutrition/entries", entryForm(), true, 303)
+	seedFood(t, a, foodForm(), 0)
+	logReviewedFood(t, a, "/nutrition/entries", entryForm())
 	doForm(t, h, "POST", "/nutrition/foods/1/delete", url.Values{"csrf": {"csrf"}}, true, 303)
 	// The saved name still identifies the retained snapshot after deletion.
 	v := entryForm()
@@ -676,7 +671,7 @@ func TestValidationNumericFormBoundaries(t *testing.T) {
 		t.Run(tc.path+"/"+tc.field+"="+tc.value, func(t *testing.T) {
 			a := testApp(t)
 			h := a.routes()
-			doForm(t, h, "POST", "/nutrition/foods", foodForm(), true, 303)
+			seedFood(t, a, foodForm(), 0)
 			v := readingForm(strings.TrimPrefix(tc.path, "/"), "2026-01-01")
 			if tc.path == "/nutrition/entries" {
 				v = entryForm()
@@ -685,8 +680,14 @@ func TestValidationNumericFormBoundaries(t *testing.T) {
 				v = url.Values{"csrf": {"csrf"}, "energy_target": {"2000"}, "height_cm": {"180"}}
 			}
 			v.Set(tc.field, tc.value)
-			w := request(h, "POST", tc.path, v.Encode(), "test")
-			if (w.Code == 303) != tc.ok {
+			path := tc.path
+			want := 303
+			if path == "/nutrition/entries" {
+				path = "/nutrition/analyze"
+				want = 200
+			}
+			w := request(h, "POST", path, v.Encode(), "test")
+			if (w.Code == want) != tc.ok {
 				t.Fatalf("status=%d body=%s want accepted=%t", w.Code, w.Body.String(), tc.ok)
 			}
 			if !tc.ok {
@@ -714,10 +715,10 @@ func TestValidationHTMLNamesAreEscaped(t *testing.T) {
 	name := `<script>alert(1)</script>`
 	v := foodForm()
 	v.Set("name", name)
-	doForm(t, h, "POST", "/nutrition/foods", v, true, 303)
+	seedFood(t, a, v, 0)
 	entry := entryForm()
 	entry.Set("food_name", name)
-	doForm(t, h, "POST", "/nutrition/entries", entry, true, 303)
+	logReviewedFood(t, a, "/nutrition/entries", entry)
 	for _, path := range []string{"/", "/nutrition"} {
 		w := request(h, "GET", path, "", "test")
 		if w.Code != 200 || strings.Contains(w.Body.String(), name) || !strings.Contains(w.Body.String(), "&lt;script&gt;") {

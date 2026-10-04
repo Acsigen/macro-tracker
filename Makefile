@@ -24,7 +24,7 @@ test-js:
 
 check:
 	$(GO) vet ./...
-	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) gopls check main.go *_test.go
+	GOCACHE=$(GOCACHE) GOMODCACHE=$(GOMODCACHE) gopls check *.go
 
 build:
 	mkdir -p bin

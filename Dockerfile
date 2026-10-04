@@ -1,12 +1,12 @@
-FROM golang:1.25-alpine AS build
+FROM golang:1.27.1-alpine3.24 AS build
 RUN apk add --no-cache make
 WORKDIR /src
 COPY go.mod go.sum ./
 COPY . .
 RUN make build
 
-FROM alpine:3.22
-RUN addgroup -S app && adduser -S -G app app && mkdir /data && chown app:app /data
+FROM alpine:3.24.2
+RUN apk add --no-cache ca-certificates && addgroup -S app && adduser -S -G app app && mkdir /data && chown app:app /data
 COPY --from=build /src/bin/macro-tracker /usr/local/bin/macro-tracker
 USER app
 VOLUME /data

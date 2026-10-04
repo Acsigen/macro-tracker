@@ -32,15 +32,15 @@ func TestReadingDateConflictPreservesBothRecords(t *testing.T) {
 func TestFoodSelectionChangesSnapshotExplicitly(t *testing.T) {
 	a := testApp(t)
 	h := a.routes()
-	doForm(t, h, "POST", "/nutrition/foods", foodForm(), true, 303)
-	doForm(t, h, "POST", "/nutrition/entries", entryForm(), true, 303)
+	seedFood(t, a, foodForm(), 0)
+	logReviewedFood(t, a, "/nutrition/entries", entryForm())
 	v := foodForm()
 	v.Set("name", "Other food")
 	v.Set("carbohydrate", "20")
-	doForm(t, h, "POST", "/nutrition/foods", v, true, 303)
+	seedFood(t, a, v, 0)
 	e := entryForm()
 	e.Set("food_name", "Other food")
-	doForm(t, h, "POST", "/nutrition/entries/1", e, true, 303)
+	logReviewedFood(t, a, "/nutrition/entries/1", e)
 	entries, err := a.listFoodEntries(context.Background(), 10)
 	if err != nil || len(entries) != 1 || entries[0].FoodID != 2 || entries[0].FoodName != "Other food" || entries[0].Carbohydrate != 20 {
 		t.Fatalf("explicit food switch: %+v %v", entries, err)
@@ -60,7 +60,7 @@ func TestFoodSelectionChangesSnapshotExplicitly(t *testing.T) {
 	}
 	e.Set("food_name", "Other food")
 	e.Set("consumed_g", "200")
-	doForm(t, h, "POST", "/nutrition/entries/1", e, true, 303)
+	logReviewedFood(t, a, "/nutrition/entries/1", e)
 	if got := mustDailyNutrition(t, a.db, "2026-01-01"); got.Carbohydrate != 40 {
 		t.Fatalf("orphaned snapshot changed: %+v", got)
 	}

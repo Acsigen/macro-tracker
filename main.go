@@ -47,11 +47,17 @@ type session struct {
 }
 
 type app struct {
-	db       *sql.DB
-	tpl      *template.Template
-	cfg      config
-	version  string
-	location *time.Location
+	db           *sql.DB
+	tpl          *template.Template
+	cfg          config
+	version      string
+	location     *time.Location
+	aiTransport  http.RoundTripper
+	aiSettingsMu sync.Mutex
+	drafts       struct {
+		sync.Mutex
+		m map[string]*analysisDraft
+	}
 	sessions struct {
 		sync.Mutex
 		m map[string]session
@@ -65,6 +71,7 @@ type profile struct {
 }
 
 type food struct {
+	analysisMetadata
 	ID                                                               int64
 	Name                                                             string
 	Carbohydrate, TotalSugar, FreeSugarPercent, Protein, Fiber, Salt float64
@@ -72,6 +79,8 @@ type food struct {
 }
 
 type foodEntry struct {
+	analysisMetadata
+	FreeSugarPercent                                          float64
 	ID, FoodID                                                int64
 	Date, FoodName                                            string
 	ConsumedG, Carbohydrate, TotalSugar, Protein, Fiber, Salt float64
@@ -99,6 +108,8 @@ type dailyStatus struct {
 }
 
 type nutritionTotals struct {
+	Omega3, Omega6                                            *float64
+	FoodCount                                                 int
 	Carbohydrate, TotalSugar, FreeSugar, Protein, Fiber, Salt float64
 	Fat                                                       *float64
 	CarbMin, CarbMax, ProteinMin, ProteinMax                  float64
@@ -112,6 +123,10 @@ type pager struct {
 }
 
 type pageData struct {
+	AI                                                                  aiSettings
+	Input                                                               foodInput
+	Review                                                              *foodReview
+	Success                                                             string
 	Title, Path, CSRF, Today, Error, Version, Range, Summary, ChartJSON string
 	Profile                                                             profile
 	Foods                                                               []food
@@ -188,8 +203,10 @@ func run(cfg config) error {
 	}
 	versionBytes, _ := files.ReadFile("VERSION")
 	tpl, err := template.New("pages").Funcs(template.FuncMap{
-		"f":   func(v float64) string { return strconv.FormatFloat(v, 'f', 1, 64) },
-		"ptr": optionalNumber,
+		"f":     func(v float64) string { return strconv.FormatFloat(v, 'f', 2, 64) },
+		"ptr":   optionalNumber,
+		"omega": omegaAmount,
+		"ratio": omegaRatio,
 	}).ParseFS(files, "templates/*.html")
 	if err != nil {
 		return err
@@ -202,7 +219,7 @@ func run(cfg config) error {
 		Handler:           a.routes(),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      30 * time.Second,
+		WriteTimeout:      90 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
 	errCh := make(chan error, 1)
@@ -282,6 +299,8 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("GET /dashboard", a.auth(a.dashboardCharts))
 	mux.HandleFunc("GET /nutrition", a.auth(a.nutritionPage))
 	mux.HandleFunc("GET /nutrition/foods/search", a.auth(a.foodSuggestions))
+	mux.HandleFunc("POST /nutrition/analyze", a.auth(a.csrf(a.analyzeFood)))
+	mux.HandleFunc("POST /nutrition/foods/{id}/analyze", a.auth(a.csrf(a.reanalyzeFood)))
 	mux.HandleFunc("POST /nutrition/foods", a.auth(a.csrf(a.saveFood)))
 	mux.HandleFunc("POST /nutrition/foods/{id}", a.auth(a.csrf(a.saveFood)))
 	mux.HandleFunc("GET /nutrition/foods/{id}/delete", a.auth(a.deletePage("food")))
@@ -302,6 +321,8 @@ func (a *app) routes() http.Handler {
 	mux.HandleFunc("POST /sleep/{id}/delete", a.auth(a.csrf(a.deleteRecord("sleep_entries", "/sleep"))))
 	mux.HandleFunc("GET /settings", a.auth(a.settingsPage))
 	mux.HandleFunc("POST /settings", a.auth(a.csrf(a.saveSettings)))
+	mux.HandleFunc("POST /settings/ai", a.auth(a.csrf(a.saveAISettings)))
+	mux.HandleFunc("POST /settings/ai/test", a.auth(a.csrf(a.testAIConnection)))
 	return a.security(a.logging(mux))
 }
 
@@ -415,8 +436,7 @@ func (a *app) csrf(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {
 			code := http.StatusBadRequest
-			var tooLarge *http.MaxBytesError
-			if errors.As(err, &tooLarge) {
+			if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 				code = http.StatusRequestEntityTooLarge
 			}
 			http.Error(w, "Invalid form", code)
@@ -507,6 +527,10 @@ func (a *app) dashboardCharts(w http.ResponseWriter, r *http.Request) {
 	if databaseError(w, err) {
 		return
 	}
+	omegaRatios, err := a.omegaRatioSeries(r.Context(), labels)
+	if databaseError(w, err) {
+		return
+	}
 	_, weight, bmis, waists, err := a.bodySeries(r.Context(), days, d.Profile)
 	if databaseError(w, err) {
 		return
@@ -530,7 +554,7 @@ func (a *app) dashboardCharts(w http.ResponseWriter, r *http.Request) {
 	t := d.Profile.EnergyTarget
 	d.ChartJSON = chartJSON(map[string]any{
 		"labels": labels, "carbohydrate": carbs, "totalSugar": totalSugar, "freeSugar": freeSugar,
-		"protein": protein, "fat": fat, "fiber": fiber, "salt": salt,
+		"protein": protein, "fat": fat, "fiber": fiber, "salt": salt, "omegaRatio": omegaRatios,
 		"weight": weight, "bmi": bmis, "waist": waists, "sleep": sleep,
 		"carbMin": t * .45 / 4, "carbMax": t * .75 / 4,
 		"proteinMin": t * .10 / 4, "proteinMax": t * .15 / 4,
@@ -562,15 +586,25 @@ func pageState(query string, page int, hasNext bool) pager {
 }
 
 func (a *app) nutritionPage(w http.ResponseWriter, r *http.Request) {
-	d := a.baseData(r, "Nutrition")
-	var err error
-	if d.Profile, err = a.getProfile(r.Context()); databaseError(w, err) {
+	d, err := a.nutritionData(r)
+	if databaseError(w, err) {
 		return
+	}
+	d.Input = foodInput{Date: d.Today}
+	a.render(w, "nutrition", d)
+}
+
+func (a *app) nutritionData(r *http.Request) (pageData, error) {
+	d := a.baseData(r, "Nutrition")
+	d.Path = "/nutrition"
+	var err error
+	if d.Profile, err = a.getProfile(r.Context()); err != nil {
+		return d, err
 	}
 	entryQuery := strings.TrimSpace(r.URL.Query().Get("entry_q"))
 	entryPage := parsePage(r.URL.Query().Get("entry_page"))
-	if d.FoodEntries, err = a.queryFoodEntries(r.Context(), entryQuery, 21, (entryPage-1)*20); databaseError(w, err) {
-		return
+	if d.FoodEntries, err = a.queryFoodEntries(r.Context(), entryQuery, 21, (entryPage-1)*20); err != nil {
+		return d, err
 	}
 	d.EntryPager = pageState(entryQuery, entryPage, len(d.FoodEntries) > 20)
 	if d.EntryPager.HasNext {
@@ -578,21 +612,21 @@ func (a *app) nutritionPage(w http.ResponseWriter, r *http.Request) {
 	}
 	foodQuery := strings.TrimSpace(r.URL.Query().Get("food_q"))
 	foodPage := parsePage(r.URL.Query().Get("food_page"))
-	if d.Foods, err = a.queryFoods(r.Context(), foodQuery, 21, (foodPage-1)*20); databaseError(w, err) {
-		return
+	if d.Foods, err = a.queryFoods(r.Context(), foodQuery, 21, (foodPage-1)*20); err != nil {
+		return d, err
 	}
 	d.FoodPager = pageState(foodQuery, foodPage, len(d.Foods) > 20)
 	if d.FoodPager.HasNext {
 		d.Foods = d.Foods[:20]
 	}
 	t := d.Profile.EnergyTarget
-	if d.Totals, err = dailyNutrition(r.Context(), a.db, d.Today); databaseError(w, err) {
-		return
+	if d.Totals, err = dailyNutrition(r.Context(), a.db, d.Today); err != nil {
+		return d, err
 	}
 	d.Totals.CarbMin, d.Totals.CarbMax = t*.45/4, t*.75/4
 	d.Totals.ProteinMin, d.Totals.ProteinMax = t*.10/4, t*.15/4
 	d.Totals.FatMin, d.Totals.FatMax = t*.15/9, t*.30/9
-	a.render(w, "nutrition", d)
+	return d, nil
 }
 
 func (a *app) listFoods(ctx context.Context) ([]food, error) {
@@ -606,20 +640,16 @@ func searchPattern(value string) string {
 
 func (a *app) queryFoods(ctx context.Context, query string, limit, offset int) ([]food, error) {
 	// ponytail: substring search scans one user's food library; add FTS only if measured latency requires it.
-	rows, err := a.db.QueryContext(ctx, `SELECT id,name,carbohydrate,total_sugar,free_sugar_percent,protein,fat,fiber,salt FROM foods WHERE name LIKE ? ESCAPE '\' COLLATE NOCASE ORDER BY name LIMIT ? OFFSET ?`, searchPattern(query), limit, offset)
+	rows, err := a.db.QueryContext(ctx, `SELECT id,`+foodColumns+` FROM foods WHERE name LIKE ? ESCAPE '\' COLLATE NOCASE ORDER BY name LIMIT ? OFFSET ?`, searchPattern(query), limit, offset)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var result []food
 	for rows.Next() {
-		var f food
-		var fat sql.NullFloat64
-		if err := rows.Scan(&f.ID, &f.Name, &f.Carbohydrate, &f.TotalSugar, &f.FreeSugarPercent, &f.Protein, &fat, &f.Fiber, &f.Salt); err != nil {
+		f, err := scanFood(rows)
+		if err != nil {
 			return nil, err
-		}
-		if fat.Valid {
-			f.Fat = &fat.Float64
 		}
 		result = append(result, f)
 	}
@@ -647,7 +677,7 @@ func (a *app) listFoodEntries(ctx context.Context, limit int) ([]foodEntry, erro
 }
 
 func (a *app) queryFoodEntries(ctx context.Context, query string, limit, offset int) ([]foodEntry, error) {
-	rows, err := a.db.QueryContext(ctx, `SELECT id,COALESCE(food_id,0),entry_date,consumed_g,food_name,carbohydrate,total_sugar,protein,fat,fiber,salt FROM food_entries WHERE food_name LIKE ? ESCAPE '\' COLLATE NOCASE ORDER BY entry_date DESC,id DESC LIMIT ? OFFSET ?`, searchPattern(query), limit, offset)
+	rows, err := a.db.QueryContext(ctx, `SELECT id,COALESCE(food_id,0),entry_date,consumed_g,`+entryFoodColumns+` FROM food_entries WHERE food_name LIKE ? ESCAPE '\' COLLATE NOCASE ORDER BY entry_date DESC,id DESC LIMIT ? OFFSET ?`, searchPattern(query), limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -655,12 +685,8 @@ func (a *app) queryFoodEntries(ctx context.Context, query string, limit, offset 
 	var result []foodEntry
 	for rows.Next() {
 		var e foodEntry
-		var fat sql.NullFloat64
-		if err := rows.Scan(&e.ID, &e.FoodID, &e.Date, &e.ConsumedG, &e.FoodName, &e.Carbohydrate, &e.TotalSugar, &e.Protein, &fat, &e.Fiber, &e.Salt); err != nil {
+		if err := rows.Scan(&e.ID, &e.FoodID, &e.Date, &e.ConsumedG, &e.FoodName, &e.Carbohydrate, &e.TotalSugar, &e.FreeSugarPercent, &e.Protein, &e.Fat, &e.Fiber, &e.Salt, &e.Omega3, &e.Omega6, &e.AnalysisSource, &e.AnalysisModel, &e.AnalyzedAt, &e.Assumptions); err != nil {
 			return nil, err
-		}
-		if fat.Valid {
-			e.Fat = &fat.Float64
 		}
 		result = append(result, e)
 	}
@@ -707,7 +733,7 @@ func optionalNumber(value *float64) string {
 	if value == nil {
 		return ""
 	}
-	return strconv.FormatFloat(*value, 'f', -1, 64)
+	return strconv.FormatFloat(*value, 'f', 2, 64)
 }
 
 func databaseError(w http.ResponseWriter, err error) bool {
@@ -740,110 +766,38 @@ func savedRecord(w http.ResponseWriter, r *http.Request, result sql.Result, err 
 	http.Redirect(w, r, redirect, http.StatusSeeOther)
 }
 
-func (a *app) saveFood(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "Invalid form", 400)
-		return
-	}
-	id, err := parseID(r)
-	if err != nil {
-		http.Error(w, err.Error(), 400)
-		return
-	}
-	name := strings.TrimSpace(r.FormValue("name"))
-	if name == "" || !validName(name) {
-		http.Error(w, "name is invalid", 400)
-		return
-	}
-	carb, e1 := formFloat(r, "carbohydrate", 0, 100)
-	sugar, e2 := formFloat(r, "total_sugar", 0, 100)
-	freeSugarPercent := 0.0
-	var e7 error
-	if r.FormValue("free_sugar_percent") != "" {
-		freeSugarPercent, e7 = formFloat(r, "free_sugar_percent", 0, 100)
-	}
-	protein, e3 := formFloat(r, "protein", 0, 100)
-	fat, e4 := formFloat(r, "fat", 0, 100)
-	fiber, e5 := formFloat(r, "fiber", 0, 100)
-	salt, e6 := formFloat(r, "salt", 0, 100)
-	if err = errors.Join(e1, e2, e3, e4, e5, e6, e7); err != nil || sugar > carb {
-		http.Error(w, "Nutrient values are invalid", 400)
-		return
-	}
-	var result sql.Result
-	if id == 0 {
-		result, err = a.db.ExecContext(r.Context(), "INSERT INTO foods(name,carbohydrate,total_sugar,free_sugar_percent,protein,fat,fiber,salt) VALUES(?,?,?,?,?,?,?,?)", name, carb, sugar, freeSugarPercent, protein, fat, fiber, salt)
-	} else {
-		result, err = a.db.ExecContext(r.Context(), "UPDATE foods SET name=?,carbohydrate=?,total_sugar=?,free_sugar_percent=?,protein=?,fat=?,fiber=?,salt=? WHERE id=?", name, carb, sugar, freeSugarPercent, protein, fat, fiber, salt, id)
-	}
-	savedRecord(w, r, result, err, "/nutrition")
-}
+func (a *app) saveFood(w http.ResponseWriter, r *http.Request) { a.saveReviewedFood(w, r, true) }
 
 func (a *app) saveFoodEntry(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
-		http.Error(w, "Invalid form", 400)
+	if r.ParseForm() != nil || rejectManualNutrition(r) {
+		http.Error(w, "Manual nutrition values are not accepted.", 400)
+		return
+	}
+	if r.PostForm.Get("draft_id") != "" {
+		a.saveReviewedFood(w, r, false)
 		return
 	}
 	id, err := parseID(r)
-	if err != nil {
-		http.Error(w, err.Error(), 400)
+	if err != nil || id == 0 {
+		http.Error(w, "Analyze or preview the food before saving.", 400)
 		return
 	}
-	foodName := strings.TrimSpace(r.FormValue("food_name"))
-	if foodName == "" || !validName(foodName) {
-		http.Error(w, "food is invalid", 400)
-		return
-	}
-	date := r.FormValue("entry_date")
-	if !validDate(date) {
-		http.Error(w, "date is invalid", 400)
-		return
-	}
+	date := r.PostForm.Get("entry_date")
 	grams, err := formFloat(r, "consumed_g", 0.01, 100000)
-	if err != nil {
-		http.Error(w, err.Error(), 400)
+	if err != nil || !validDate(date) {
+		http.Error(w, "Enter a valid date and portion weight.", 400)
 		return
 	}
-	ctx := r.Context()
-	tx, err := a.db.BeginTx(ctx, nil)
-	if databaseError(w, err) {
-		return
-	}
-	defer tx.Rollback()
-	var f food
-	var fat sql.NullFloat64
-	if id > 0 {
-		err = tx.QueryRowContext(ctx, "SELECT COALESCE(food_id,0),food_name,carbohydrate,total_sugar,free_sugar_percent,protein,fat,fiber,salt FROM food_entries WHERE id=?", id).Scan(&f.ID, &f.Name, &f.Carbohydrate, &f.TotalSugar, &f.FreeSugarPercent, &f.Protein, &fat, &f.Fiber, &f.Salt)
-		if errors.Is(err, sql.ErrNoRows) {
-			http.NotFound(w, r)
-			return
-		}
-		if databaseError(w, err) {
-			return
-		}
-	}
-	if id == 0 || !strings.EqualFold(foodName, f.Name) {
-		err = tx.QueryRowContext(ctx, "SELECT id,name,carbohydrate,total_sugar,free_sugar_percent,protein,fat,fiber,salt FROM foods WHERE name=? COLLATE NOCASE", foodName).Scan(&f.ID, &f.Name, &f.Carbohydrate, &f.TotalSugar, &f.FreeSugarPercent, &f.Protein, &fat, &f.Fiber, &f.Salt)
-		if errors.Is(err, sql.ErrNoRows) {
-			http.Error(w, "food is invalid", 400)
-			return
-		}
-		if databaseError(w, err) {
-			return
-		}
-	}
-	var sourceID any
-	if f.ID != 0 {
-		sourceID = f.ID
-	}
-	var result sql.Result
-	if id == 0 {
-		result, err = tx.ExecContext(ctx, "INSERT INTO food_entries(food_id,entry_date,consumed_g,food_name,carbohydrate,total_sugar,free_sugar_percent,protein,fat,fiber,salt) VALUES(?,?,?,?,?,?,?,?,?,?,?)", sourceID, date, grams, f.Name, f.Carbohydrate, f.TotalSugar, f.FreeSugarPercent, f.Protein, nullable(fat), f.Fiber, f.Salt)
-	} else {
-		result, err = tx.ExecContext(ctx, "UPDATE food_entries SET food_id=?,entry_date=?,consumed_g=?,food_name=?,carbohydrate=?,total_sugar=?,free_sugar_percent=?,protein=?,fat=?,fiber=?,salt=? WHERE id=?", sourceID, date, grams, f.Name, f.Carbohydrate, f.TotalSugar, f.FreeSugarPercent, f.Protein, nullable(fat), f.Fiber, f.Salt, id)
-	}
+	result, err := a.db.ExecContext(r.Context(), "UPDATE food_entries SET entry_date=?,consumed_g=? WHERE id=? AND food_name=? COLLATE NOCASE", date, grams, id, strings.TrimSpace(r.PostForm.Get("food_name")))
 	if err == nil {
-		err = tx.Commit()
+		n, e := result.RowsAffected()
+		if databaseError(w, e) {
+			return
+		}
+		if n == 0 {
+			http.Error(w, "This entry is missing or its description changed. Analyze the food before saving.", 400)
+			return
+		}
 	}
 	savedRecord(w, r, result, err, "/nutrition")
 }
@@ -858,14 +812,19 @@ func nullable(v sql.NullFloat64) any {
 func dailyNutrition(ctx context.Context, db *sql.DB, date string) (nutritionTotals, error) {
 	var carbs, sugar, freeSugar, protein, fiber, salt float64
 	var fat sql.NullFloat64
-	var unknownFat int
-	err := db.QueryRowContext(ctx, `SELECT COALESCE(SUM(carbohydrate*consumed_g/100),0),COALESCE(SUM(total_sugar*consumed_g/100),0),COALESCE(SUM(total_sugar*free_sugar_percent*consumed_g/10000),0),COALESCE(SUM(protein*consumed_g/100),0),SUM(fat*consumed_g/100),COALESCE(SUM(fiber*consumed_g/100),0),COALESCE(SUM(salt*consumed_g/100),0),COALESCE(SUM(fat IS NULL),0) FROM food_entries WHERE entry_date=?`, date).Scan(&carbs, &sugar, &freeSugar, &protein, &fat, &fiber, &salt, &unknownFat)
+	var unknownFat, unknownOmega, foodCount int
+	var omega3, omega6 sql.NullFloat64
+	err := db.QueryRowContext(ctx, `SELECT COALESCE(SUM(carbohydrate*consumed_g/100),0),COALESCE(SUM(total_sugar*consumed_g/100),0),COALESCE(SUM(total_sugar*free_sugar_percent*consumed_g/10000),0),COALESCE(SUM(protein*consumed_g/100),0),SUM(fat*consumed_g/100),COALESCE(SUM(fiber*consumed_g/100),0),COALESCE(SUM(salt*consumed_g/100),0),COALESCE(SUM(fat IS NULL),0),SUM(omega3*consumed_g/100),SUM(omega6*consumed_g/100),COALESCE(SUM(omega3 IS NULL OR omega6 IS NULL),0),COUNT(*) FROM food_entries WHERE entry_date=?`, date).Scan(&carbs, &sugar, &freeSugar, &protein, &fat, &fiber, &salt, &unknownFat, &omega3, &omega6, &unknownOmega, &foodCount)
 	if err != nil {
 		return nutritionTotals{}, err
 	}
-	result := nutritionTotals{Carbohydrate: carbs, TotalSugar: sugar, FreeSugar: freeSugar, Protein: protein, Fiber: fiber, Salt: salt}
+	result := nutritionTotals{FoodCount: foodCount, Carbohydrate: carbs, TotalSugar: sugar, FreeSugar: freeSugar, Protein: protein, Fiber: fiber, Salt: salt}
 	if fat.Valid && unknownFat == 0 {
 		result.Fat = &fat.Float64
+	}
+	if unknownOmega == 0 && omega3.Valid && omega6.Valid {
+		result.Omega3 = &omega3.Float64
+		result.Omega6 = &omega6.Float64
 	}
 	return result, nil
 }
@@ -913,6 +872,34 @@ func (a *app) nutritionSeries(ctx context.Context, days int) ([]string, []float6
 		}
 	}
 	return labels, carbs, totalSugar, freeSugar, protein, fat, fiber, salt, rows.Err()
+}
+
+func (a *app) omegaRatioSeries(ctx context.Context, labels []string) ([]any, error) {
+	ratios := make([]any, len(labels))
+	index := make(map[string]int, len(labels))
+	for i, date := range labels {
+		index[date] = i
+	}
+	rows, err := a.db.QueryContext(ctx, `SELECT entry_date,SUM(omega3*consumed_g/100),SUM(omega6*consumed_g/100),SUM(omega3 IS NULL OR omega6 IS NULL) FROM food_entries WHERE entry_date BETWEEN ? AND ? GROUP BY entry_date`, labels[0], labels[len(labels)-1])
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var date string
+		var omega3, omega6 sql.NullFloat64
+		var unknown int
+		if err := rows.Scan(&date, &omega3, &omega6, &unknown); err != nil {
+			return nil, err
+		}
+		if i, ok := index[date]; ok && unknown == 0 && omega3.Valid && omega6.Valid && omega6.Float64 > 0 {
+			ratio := omega3.Float64 / omega6.Float64
+			if !math.IsNaN(ratio) && !math.IsInf(ratio, 0) {
+				ratios[i] = ratio
+			}
+		}
+	}
+	return ratios, rows.Err()
 }
 
 func dateLabels(now time.Time, days int) []string {
@@ -1154,12 +1141,7 @@ func (a *app) sleepSeries(ctx context.Context, days int) ([]string, []any, error
 }
 
 func (a *app) settingsPage(w http.ResponseWriter, r *http.Request) {
-	d := a.baseData(r, "Settings")
-	var err error
-	if d.Profile, err = a.getProfile(r.Context()); databaseError(w, err) {
-		return
-	}
-	a.render(w, "settings", d)
+	a.aiSettingsPage(w, r, 200, "", nil)
 }
 func (a *app) saveSettings(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
